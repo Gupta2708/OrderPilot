@@ -30,9 +30,11 @@ with workflow.unsafe.imports_passed_through():
         FinalizeRequest,
         FinalizeResponse,
         MemoryRequest,
+        SnapshotRequest,
         compact_run_memory,
         finalize_run,
         make_decision,
+        persist_snapshot,
         run_business_action,
     )
     from app.temporal.types import RunParams, RunResult
@@ -47,6 +49,7 @@ DECISION_TIMEOUT = timedelta(minutes=2)
 ACTION_TIMEOUT = timedelta(seconds=30)
 MEMORY_TIMEOUT = timedelta(seconds=30)
 FINALIZE_TIMEOUT = timedelta(minutes=1)
+PERSIST_TIMEOUT = timedelta(seconds=30)
 
 
 class ActivityType:
@@ -82,6 +85,7 @@ class OrderSupervisorWorkflow:
         self._seen_event_ids: set[str] = set()
         self._instructions: list[str] = []
         self._timeline: list[dict[str, Any]] = []
+        self._unpersisted: list[dict[str, Any]] = []
         self._memory_summary: str = ""
         self._executed_actions: list[dict[str, Any]] = []
         self._latest_decision: dict[str, Any] | None = None
@@ -124,6 +128,7 @@ class OrderSupervisorWorkflow:
 
         # Wake 1 of 3: workflow start.
         await self._wake("WORKFLOW_START", None, None)
+        await self._persist()
 
         while self._terminal_reason is None:
             if self._terminate_requested:
@@ -132,7 +137,10 @@ class OrderSupervisorWorkflow:
 
             if self._paused:
                 # A paused run takes no agent action but stays terminable.
-                await workflow.wait_condition(lambda: not self._paused or self._terminate_requested)
+                await self._persist()
+                await workflow.wait_condition(
+                    lambda: not self._paused or self._terminate_requested or bool(self._unpersisted)
+                )
                 continue
 
             timeout = self._seconds_until_next_wake()
@@ -147,6 +155,7 @@ class OrderSupervisorWorkflow:
                     # Wake 3 of 3: scheduled review.
                     self._stats["scheduled_reviews"] += 1
                     await self._wake("SCHEDULED_TIMER", None, None)
+                    await self._persist()
                     continue
             elif self._max_age_reached():
                 self._terminal_reason = TerminalReason.MAX_AGE_REACHED
@@ -159,6 +168,7 @@ class OrderSupervisorWorkflow:
                 continue
 
             await self._drain_pending_events()
+            await self._persist()
 
         return await self._finalize()
 
@@ -242,7 +252,15 @@ class OrderSupervisorWorkflow:
     # ------------------------------------------------------------- internals
 
     def _needs_attention(self) -> bool:
-        return bool(self._pending_events) or self._terminate_requested or self._paused
+        # Unpersisted rows count: a Signal that only writes to the timeline
+        # (a duplicate event, a rejected event, an instruction while idle) must
+        # still wake the loop so that row reaches Postgres promptly.
+        return (
+            bool(self._pending_events)
+            or bool(self._unpersisted)
+            or self._terminate_requested
+            or self._paused
+        )
 
     def _max_age_reached(self) -> bool:
         assert self._params is not None and self._started_at is not None
@@ -436,7 +454,50 @@ class OrderSupervisorWorkflow:
         self._record(
             ActivityType.FINAL_OUTPUT, {"final_summary": final.final_summary, "stats": stats}
         )
+        await self._persist(
+            final_output={
+                "final_summary": final.final_summary,
+                "important_actions": list(final.important_actions),
+                "learnings": list(final.learnings),
+                "recommendations": recommendations,
+                "terminal_reason": str(reason),
+                "stats": stats,
+            }
+        )
         return result
+
+    async def _persist(self, final_output: dict[str, Any] | None = None) -> None:
+        """Write current run state and any new timeline rows to Postgres.
+
+        Buffered rather than per-entry so one durable write covers a whole wake
+        cycle. Cleared only after the Activity succeeds, so a failed write is
+        retried with the same rows rather than losing them.
+        """
+        assert self._params is not None
+        pending = list(self._unpersisted)
+        if not pending and final_output is None:
+            return
+        completed_at = workflow.now() if final_output is not None else None
+        await workflow.execute_activity(
+            persist_snapshot,
+            SnapshotRequest(
+                run_id=self._params.run_id,
+                status=str(self._current_status()),
+                order_state=self._order_state,
+                memory_summary=self._memory_summary,
+                run_instructions=list(self._instructions),
+                latest_decision=self._latest_decision,
+                next_wake_at=self._iso(self._next_wake_at),
+                last_wake_at=self._iso(self._last_wake_at),
+                stats=dict(self._stats),
+                final_output=final_output,
+                completed_at=self._iso(completed_at),
+                activities=pending,
+            ),
+            start_to_close_timeout=PERSIST_TIMEOUT,
+            retry_policy=ACTION_RETRY,
+        )
+        del self._unpersisted[: len(pending)]
 
     def _recent_activity(self) -> list[dict[str, Any]]:
         """A small, readable window of history for the prompt."""
@@ -477,6 +538,7 @@ class OrderSupervisorWorkflow:
                 "payload": payload,
             }
         )
+        self._unpersisted.append(self._timeline[-1])
         if len(self._timeline) > MAX_TIMELINE_ENTRIES:
             self._timeline = self._timeline[-MAX_TIMELINE_ENTRIES:]
 

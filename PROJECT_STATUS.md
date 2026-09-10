@@ -1,60 +1,64 @@
 # Project status
 
-## Stage 2 — complete (2026-09-10)
+## Stage 3 — complete (2026-09-10)
 
-Stage 1 was committed and pushed by the user as `80e0bd9`. The working tree was clean at the start of this stage; both Docker services were healthy and were re-verified before starting. Stage 2 adds the agent runtime on top of the durable workflow. No commit or push has been made by the assistant.
+Stage 2 was committed and pushed by the user as `de895af`. The working tree was clean at the start of this stage and both Docker services were healthy. Stage 3 adds persistence and the FastAPI control plane, completing the P0 backend. No commit or push has been made by the assistant.
 
-### Built in Stage 2
+### Built in Stage 3
 
-- `app/agent/schema.py` — the Pydantic decision contract. Tool names are a closed enum in the schema, so an invented tool fails validation rather than reaching the allow-list. `normalize()` then resolves the sleep specification to a bounded integer and filters actions against the supervisor's allowed list, returning the rejected names so the rejection is auditable. An `ACT` whose every tool was rejected is downgraded to `NO_ACTION`.
-- `app/agent/provider.py` — one provider interface with two implementations. `ClaudeProvider` uses the Anthropic SDK's structured-output parse endpoint with `claude-opus-5` and server-side refusal fallbacks. `MockProvider` is deterministic, needs no key or network, and is the default. `deterministic_fallback()` never acts.
-- `app/agent/prompt.py` — compact per-decision context: supervisor instruction, live run instructions, structured order state, memory, triggering event, wake evaluation, a short recent-activity window, and allowed actions. Raw history is never sent.
-- `app/agent/execution.py` — the five business actions, simulated, each returning a structured success/failure result; plus deterministic memory compaction with a line cap, a dropped-note marker, and a character cap.
-- `app/temporal/activities.py` — four Activities: `make_decision`, `run_business_action`, `compact_run_memory`, `finalize_run`.
-- `app/temporal/workflow.py` — rewired to call those Activities with explicit timeouts and retry policies. The workflow still performs no I/O and its lifecycle rules are unchanged.
-- Configuration: `LLM_PROVIDER` (default `mock`), `ANTHROPIC_MODEL` (default `claude-opus-5`), `ANTHROPIC_API_KEY`, all documented in `.env.example`.
+- Migration `0002_run_persistence` — adds `runs.last_wake_at`, `runs.stats`, `activities.seq`, and a unique `(run_id, seq)` constraint that makes persistence retry-safe. Models updated to match; `alembic check` reports no drift.
+- `app/repository.py` — database access for supervisors, runs, and the unified timeline, including `save_run_snapshot`, which upserts run state and inserts new activity rows with `ON CONFLICT DO NOTHING`.
+- `app/temporal/activities.py` — new `persist_snapshot` Activity, with one engine per worker process.
+- `app/temporal/workflow.py` — buffers timeline rows and flushes them with current run state after the start wake, after each event drain, after each scheduled review, before parking on a pause, and at finalization. The final output is persisted with `completed_at`.
+- `app/services/runs.py` — run creation, workflow start, and the mapping from product operations to Signals and Queries, kept out of the HTTP handlers.
+- `app/api/` — `deps.py` (request-scoped session, Temporal client), `schemas.py`, `supervisors.py`, `runs.py`.
+- `app/main.py` — lifespan that opens the database engine and Temporal client once per process. A missing Temporal service degrades to 503 on control endpoints rather than failing startup, so reads keep working.
 
-The action allow-list is enforced three times: the schema constrains tool names, the Activity filters against the supervisor configuration, and execution re-checks before running anything.
+All twelve endpoints from the assignment are implemented. Starting a run writes the run row and then starts exactly one workflow keyed `order-supervisor:<order_id>`; a duplicate order returns 409. Events, instructions, and controls are Signals and return 202. Errors map to 404 (unknown supervisor or run), 409 (duplicate order, or a workflow no longer accepting signals), 422 (invalid input, including unknown action names), and 503 (Temporal unreachable).
+
+**One design decision worth noting:** the API never writes run progress. It starts workflows and sends Signals; the workflow persists its own state. That keeps a single writer for run progress and avoids the API and the workflow racing to describe the same run.
+
+**One real defect found and fixed during this stage.** A Signal that only writes a timeline row — a duplicate event, a rejected event, an instruction while the run is idle — left the workflow parked in `wait_condition`, so that row was never flushed to Postgres until the next unrelated wake. The end-to-end test caught it. The wait condition now also wakes on unflushed rows.
 
 ### Validation performed (2026-09-10)
 
 | Check | Result |
 | --- | --- |
-| `pytest` with `RUN_INTEGRATION=1` | PASS: 50 passed, 0 skipped |
-| `pytest tests/test_agent.py` | PASS: 18 agent runtime tests |
+| `pytest` with `RUN_INTEGRATION=1` | PASS: 64 passed, 0 skipped |
+| `pytest tests/test_end_to_end.py` | PASS: full P0 backend over HTTP |
+| `pytest tests/test_api.py` | PASS: 13 API contract tests |
 | `pytest tests/test_workflow.py` | PASS: 15 Temporal lifecycle tests |
+| `pytest tests/test_agent.py` | PASS: 18 agent runtime tests |
 | `pytest tests/test_domain.py` | PASS: 12 domain tests |
-| `ruff check .` | PASS |
-| `ruff format --check .` | PASS |
-| `mypy` (strict) | PASS: 24 source files |
-| Live end-to-end run against the Docker Temporal server | PASS: see below |
+| `ruff check .` / `ruff format --check .` | PASS |
+| `mypy` (strict) | PASS: 32 source files |
+| `alembic upgrade head` and `alembic check` | PASS: no drift |
+| Live run driven through the HTTP API | PASS: see below |
 
-New tests cover schema validation and rejection of malformed output, rejection of invented tool names, allow-list filtering with the rejected tools reported, `ACT` downgraded when all tools are rejected, sleep clamping and timestamp conversion, execution of all five actions, refusal of disallowed and unknown tools, safe defaults for missing arguments, memory compaction and de-duplication, mock determinism, the deterministic fallback when the provider fails, and prompt composition. Two workflow tests cover the Stage 2 exit criteria directly: a stub provider that recommends completion on every decision cannot end a run (only a later `delivered` event does), and a disallowed tool is never executed end to end.
+`tests/test_end_to_end.py` is the Stage 3 exit gate: a real worker, a real workflow on Temporal's time-skipping test server, a real database, and the real routers. It walks the whole P0 backend — configure a supervisor, start a run, confirm the start wake is persisted, confirm live state comes from the workflow, confirm a routine event updates state without waking the agent, add an instruction and inject `shipment_delayed` to drive a real action, confirm a duplicate event is ignored, pause and resume, then complete via `delivered` and confirm the final output, ordered gap-free timeline, and database-sourced state after closure. It commits, so it cleans up its own rows.
 
-The live smoke ran a real worker against the Docker Temporal dev server with the mock provider: start woke the agent and slept; `payment_confirmed` updated state without waking it; an instruction plus `shipment_delayed` woke the agent, which executed `message_logistics_team` and `create_internal_note` and updated compact memory; pause reported `PAUSED`; `delivered` completed the run as `COMPLETED` / `delivered` with 3 events, 3 wake-ups, 3 executed actions, 0 failed, 0 rejected, 0 fallback decisions, and a populated final summary.
+`tests/test_api.py` runs against a real database with a faked Temporal client, inside a rolled-back transaction, and covers HTTP status mapping, duplicate orders, unknown supervisors and runs, signal routing, event-id preservation, and the live-versus-database state fallback.
+
+The live check ran the real worker and Uvicorn against Docker Temporal and Postgres, exercising the lifespan wiring the tests bypass. Creating a supervisor and a run, adding an instruction, injecting `payment_confirmed` and `shipment_delayed`, then `delivered`: the run reached `COMPLETED` with 22 persisted timeline rows, 3 wake-ups, 1 no-wake event, 3 executed actions, compact memory across three notes, and a populated final output.
 
 ### Known limitations
 
-- **The Claude provider path has not been executed against the live API.** No `ANTHROPIC_API_KEY` is available on this machine, so it was verified only by checking the call against the installed SDK's actual signatures (`anthropic` 1.4.0: `client.beta.messages.parse` accepts `output_format`, `betas`, and `fallbacks`) and by strict type checking. Every test and the live smoke ran on the mock provider. This needs one real call before any demo that claims live AI.
-- Nothing is persisted to PostgreSQL yet and there is no API, so state is reachable only through Temporal Queries. That is Stage 3.
-- Memory compaction is deterministic truncation, not summarization. Reasonable at this size, but it will lose detail on very long runs.
-- The wake policy is still deterministic only; the lightweight AI classifier is Stage 5, as is the human approval gate for `message_customer`.
-- Actions are simulated, as the assignment allows.
-- Worker-restart durability is still not demonstrated; that is Stage 5.
-- The Temporal dev container still runs as root to work around root-owned named volumes. Local development only.
+- **The Claude provider path still has not been executed against the live API** (no key on this machine). Everything ran on the deterministic mock. Unchanged from Stage 2 and still the main thing to verify before a demo that claims live AI.
+- No UI yet; that is Stage 4.
+- `GET /api/runs` returns every run with no pagination. Fine at POC scale, wrong at real scale.
+- Persistence flushes at wake boundaries, so between a Signal and the next flush the database can lag the workflow by a moment. `GET /api/runs/{id}/state` reads the workflow directly and is the authoritative view.
+- If the worker is not running, runs are created but never progress. Both processes are required, and the README now says so.
+- The wake classifier, approval gate, and worker-restart durability demo remain Stage 5; analytics and Continue-As-New remain Stage 6.
+- One demo supervisor and one completed run from the live check were deliberately left in the local development database as useful seed data for the Stage 4 dashboard.
 
 ### Files and areas changed
 
-- Added: `backend/app/agent/` (`__init__`, `schema`, `provider`, `prompt`, `execution`), `backend/app/temporal/activities.py`, `backend/tests/test_agent.py`.
-- Modified: `backend/app/temporal/workflow.py` (calls Activities; lifecycle rules unchanged), `backend/app/temporal/worker.py` (registers Activities), `backend/app/config.py` (provider settings), `backend/pyproject.toml` and `backend/uv.lock` (added `anthropic`), `backend/tests/test_workflow.py` (register Activities, wait on decision results, three new tests), `.env.example`, `README.md`, `docs/ARCHITECTURE.md`, this file.
-- Unchanged: FastAPI app, database models, migrations, `compose.yaml`, and the whole frontend.
-
-### Stage 0 and Stage 1 status
-
-Both remain green. The Stage 0 exit gate was cleared earlier today after repairing a corrupt cached Temporal image and a root-owned volume; those fixes are in `compose.yaml` and were committed in `80e0bd9`.
+- Added: `backend/migrations/versions/0002_run_persistence.py`, `backend/app/repository.py`, `backend/app/services/` (`__init__`, `runs`), `backend/app/api/` (`__init__`, `deps`, `schemas`, `supervisors`, `runs`), `backend/tests/test_api.py`, `backend/tests/test_end_to_end.py`.
+- Modified: `backend/app/main.py` (routers and lifespan), `backend/app/models.py`, `backend/app/db.py` (session factory), `backend/app/temporal/activities.py` (`persist_snapshot`), `backend/app/temporal/workflow.py` (flush points and the wait-condition fix), `backend/tests/test_workflow.py` (stubs persistence so lifecycle tests stay database-free), `README.md`, `docs/ARCHITECTURE.md`, this file.
+- Unchanged: the agent runtime, the domain layer, `compose.yaml`, `.env.example`, and the whole frontend.
 
 ### Next stage
 
-Stage 3 — Persistence + FastAPI + End-to-End P0 Backend: persist supervisors, runs, unified activities, order state, memory, latest decision, and final outputs; implement the supervisor/run/event/instruction/control endpoints; start workflows from the API and map events and controls onto Signals; expose timeline, memory, and final output over HTTP.
+Stage 4 — Product UI + Event Simulator + Complete P0: the dashboard, supervisor configuration, start-run screen, Run Control Room with status badges, order-state card, next-wake display, memory card, decision and wake-reason cards, unified timeline, action history, event injector, instruction input, pause/resume/terminate controls, final output, and the four scenario presets.
 
-**Stage 3 has NOT been started.**
+**Stage 4 has NOT been started.**

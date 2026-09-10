@@ -5,12 +5,14 @@ generation all run as Activities so the workflow stays replay-safe.
 """
 
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio import activity
 
 from app.agent.execution import ActionOutcome, compact_memory, execute_action
@@ -18,8 +20,20 @@ from app.agent.prompt import AgentContext
 from app.agent.provider import build_provider, deterministic_fallback
 from app.agent.schema import AgentDecisionModel, normalize
 from app.config import get_settings
+from app.db import create_engine, create_session_factory
+from app.repository import save_run_snapshot
 
 logger = logging.getLogger(__name__)
+
+# One engine per worker process, created on first use.
+_ENGINE: AsyncEngine | None = None
+
+
+def _persistence_engine() -> AsyncEngine:
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = create_engine()
+    return _ENGINE
 
 
 @dataclass
@@ -223,9 +237,65 @@ async def finalize_run(request: FinalizeRequest) -> FinalizeResponse:
     )
 
 
+@dataclass
+class SnapshotRequest:
+    """One durable write of run progress: current state plus new timeline rows."""
+
+    run_id: str
+    status: str
+    order_state: dict[str, Any] = field(default_factory=dict)
+    memory_summary: str = ""
+    run_instructions: list[str] = field(default_factory=list)
+    latest_decision: dict[str, Any] | None = None
+    next_wake_at: str | None = None
+    last_wake_at: str | None = None
+    stats: dict[str, int] = field(default_factory=dict)
+    final_output: dict[str, Any] | None = None
+    completed_at: str | None = None
+    activities: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@activity.defn
+async def persist_snapshot(request: SnapshotRequest) -> int:
+    """Persist run state and new activities. Returns the rows offered for insert.
+
+    Retry-safe: activity rows conflict on (run_id, seq) and are ignored, and the
+    run row is a plain overwrite of the workflow's current truth.
+    """
+    engine = _persistence_engine()
+    session_factory = create_session_factory(engine)
+    async with session_factory() as session, session.begin():
+        await save_run_snapshot(
+            session,
+            run_id=uuid.UUID(request.run_id),
+            status=request.status,
+            order_state=request.order_state,
+            memory_summary=request.memory_summary,
+            run_instructions=request.run_instructions,
+            latest_decision=request.latest_decision,
+            next_wake_at=_parse_iso(request.next_wake_at),
+            last_wake_at=_parse_iso(request.last_wake_at),
+            stats=request.stats,
+            final_output=request.final_output,
+            completed_at=_parse_iso(request.completed_at),
+            activities=request.activities,
+        )
+    return len(request.activities)
+
+
 ALL_ACTIVITIES: list[Callable[..., Any]] = [
     make_decision,
     run_business_action,
     compact_run_memory,
     finalize_run,
+    persist_snapshot,
 ]

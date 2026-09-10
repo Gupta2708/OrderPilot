@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
+from temporalio import activity
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
@@ -21,11 +22,25 @@ from app.agent.schema import AgentDecisionModel, SleepSpec
 from app.domain.actions import BusinessAction
 from app.domain.events import EventType
 from app.domain.lifecycle import RunStatus, TerminalReason
-from app.temporal.activities import ALL_ACTIVITIES
+from app.temporal.activities import ALL_ACTIVITIES, SnapshotRequest, persist_snapshot
 from app.temporal.types import RunParams, RunResult, workflow_id_for_order
 from app.temporal.workflow import ActivityType, OrderSupervisorWorkflow
 
 TASK_QUEUE = "orderpilot-test"
+
+
+@activity.defn(name="persist_snapshot")
+async def noop_persist(request: SnapshotRequest) -> int:
+    """These tests cover Temporal lifecycle only, so persistence is stubbed out.
+
+    The real persistence Activity is covered end to end in test_end_to_end.py.
+    """
+    return len(request.activities)
+
+
+LIFECYCLE_ACTIVITIES = [entry for entry in ALL_ACTIVITIES if entry is not persist_snapshot] + [
+    noop_persist
+]
 
 BASE_PARAMS = RunParams(
     run_id="run-1",
@@ -46,7 +61,7 @@ async def running_workflow(
             env.client,
             task_queue=TASK_QUEUE,
             workflows=[OrderSupervisorWorkflow],
-            activities=ALL_ACTIVITIES,
+            activities=LIFECYCLE_ACTIVITIES,
         ):
             handle: WorkflowHandle[Any, RunResult] = await env.client.start_workflow(
                 OrderSupervisorWorkflow.run,

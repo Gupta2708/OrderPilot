@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -34,6 +44,8 @@ class Run(Base):
     memory_summary: Mapped[str] = mapped_column(Text, default="")
     run_instructions: Mapped[list[str]] = mapped_column(JSONB, default=list)
     next_wake_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_wake_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=text("'{}'"))
     latest_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     final_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -42,10 +54,14 @@ class Run(Base):
 
 class ActivityRecord(Base):
     __tablename__ = "activities"
-    __table_args__ = (Index("ix_activities_run_id_created_at", "run_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_activities_run_id_created_at", "run_id", "created_at"),
+        UniqueConstraint("run_id", "seq", name="uq_activities_run_id_seq"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
+    seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     type: Mapped[str] = mapped_column(String(60))
     source: Mapped[str] = mapped_column(String(60))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)

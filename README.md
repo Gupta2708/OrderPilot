@@ -2,7 +2,7 @@
 
 Durable AI order supervisor for the original Order Supervisor PDF assignment. The PDF is the requirements source; the existing staged prompt is preserved but is not an additional requirements source.
 
-Implemented through Stage 2: Next.js/Tailwind landing page, FastAPI liveness, PostgreSQL schema/migration, local Temporal configuration, `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules — plus the agent runtime: a Pydantic-validated decision contract, a Claude provider and a deterministic mock, the five business actions executing behind an allow-list, compact rolling memory, and a finalization Activity. There is no run-management API or UI yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
+Implemented through Stage 3: Next.js/Tailwind landing page, PostgreSQL schema/migrations, local Temporal configuration, `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules — the agent runtime with a Pydantic-validated decision contract, a Claude provider and a deterministic mock, the five business actions behind an allow-list, and compact rolling memory — plus the full P0 backend: runs, unified activity history, memory, decisions, and final outputs persisted to PostgreSQL and exposed over a FastAPI control plane. The whole system can now be exercised without a frontend. There is no UI yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 **No API key is required.** The default `LLM_PROVIDER=mock` runs a deterministic agent, so the whole system can be demonstrated offline.
 
@@ -142,4 +142,40 @@ The five actions — `message_fulfillment_team`, `message_payments_team`, `messa
 
 The agent can recommend completion, but it cannot cause it. Terminal state remains owned by the workflow rules above.
 
-See [architecture](docs/ARCHITECTURE.md). Stage 3 adds persistence and the FastAPI control plane.
+## API (Stage 3)
+
+All endpoints are under `/api`. Interactive docs are at http://127.0.0.1:8000/docs.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/supervisors` | Create a supervisor configuration |
+| GET | `/api/supervisors` | List supervisors |
+| GET | `/api/supervisors/{id}` | Fetch one supervisor |
+| POST | `/api/runs` | Create a run and start its workflow |
+| GET | `/api/runs` | List runs, optionally `?status=` |
+| GET | `/api/runs/{run_id}` | Persisted record: state, memory, timeline, final output |
+| GET | `/api/runs/{run_id}/state` | Live workflow state, falling back to the database |
+| POST | `/api/runs/{run_id}/events` | Deliver a lifecycle event as a Signal |
+| POST | `/api/runs/{run_id}/instructions` | Add a live run instruction |
+| POST | `/api/runs/{run_id}/pause` | Pause the run |
+| POST | `/api/runs/{run_id}/resume` | Resume the run |
+| POST | `/api/runs/{run_id}/terminate` | Terminate the run |
+
+Starting a run writes the run row and then starts exactly one workflow, keyed `order-supervisor:<order_id>`. A second run for the same order returns 409. Events, instructions, and controls are Signals; the workflow de-duplicates events by `event_id`, and the API generates one when the caller omits it. Controls return 202 because they are asynchronous: the Signal is accepted, and the workflow applies it on its next step.
+
+Error mapping: 404 for an unknown supervisor or run, 409 for a duplicate order or a workflow that is no longer accepting signals, 422 for invalid input such as an unknown action name, and 503 when Temporal is unreachable. The API still serves reads when Temporal is down.
+
+The workflow persists its own progress: it buffers timeline rows and writes them, with current run state, through a persistence Activity. Rows carry a per-run sequence number with a unique constraint, so a retried write cannot duplicate history.
+
+**Both processes are needed for a working system.** The API starts workflows; the worker executes them. With the worker stopped, runs are created but never progress.
+
+Running the backend end to end:
+
+```powershell
+Set-Location backend
+uv run --locked alembic upgrade head
+uv run --locked python -m app.temporal.worker      # terminal 1
+uv run --locked uvicorn app.main:app --port 8000   # terminal 2
+```
+
+See [architecture](docs/ARCHITECTURE.md). Stage 4 adds the product UI and event simulator.
