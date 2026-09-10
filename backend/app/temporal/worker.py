@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import logging
 
-from temporalio import activity
 from temporalio.worker import Worker
 
 from app.config import get_settings
@@ -11,19 +10,13 @@ from app.temporal.client import connect_client
 from app.temporal.workflow import OrderSupervisorWorkflow
 
 
-@activity.defn
-async def scaffold_health() -> str:
-    """Infrastructure probe only; no order or business behavior."""
-    return "ok"
-
-
 async def run_worker(smoke: bool = False) -> None:
     client = await connect_client()
     worker = Worker(
         client,
         task_queue=get_settings().temporal_task_queue,
         workflows=[OrderSupervisorWorkflow],
-        activities=[*ALL_ACTIVITIES, scaffold_health],
+        activities=ALL_ACTIVITIES,
     )
     async with worker:
         logging.info(

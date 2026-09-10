@@ -1,63 +1,79 @@
 # Project status
 
-## Stage 6 — complete (2026-09-10). P0, P1, and P2 are done.
+## Stage 7 — complete (2026-09-10). The project is submission-ready.
 
-Stage 5 was committed and pushed by the user as `c62a484`, together with the OpenRouter provider work. Stage 6 adds P2: run analytics, adaptive wake guidance, Continue-As-New, and supervisor templates. No commit or push has been made by the assistant.
+Stage 6 was committed and pushed by the user as `dc0f3a1`. Stage 7 is final hardening, documentation, and submission readiness. All seven stages are now done: P0, P1, and P2 are complete. No commit or push has been made by the assistant.
 
-### Built in Stage 6
+### Done in Stage 7
 
-**Run analytics.** `GET /api/runs/{run_id}/analytics` returns events received, agent wake-ups, no-wake events, classifier calls, scheduled reviews, actions executed, customer actions, approvals granted and rejected, continuations, and duration, plus two derived ratios: wake rate and actions per wake. Counters are maintained by the workflow and persisted with each snapshot, so analytics are derived from the run row rather than kept as a second aggregate that could drift. Wake rate counts only signal-driven wakes, since the start wake and scheduled reviews are not responses to events.
+**Repository housekeeping.** `ORDER_PILOT_STAGED_BUILD_PROMPT.md` is now untracked and gitignored, at the user's request. The local file is untouched; only the Git index changed. Note that the file still exists in earlier commits already pushed to GitHub — removing it from history would need a rewrite (`git filter-repo` or BFG) and a force push, which was not done.
 
-**Adaptive wake guidance.** The agent may return up to three short standing hints. They are cleaned, de-duplicated, length-capped, persisted on the run (migration `0003`), shown in the control room, and fed to the classifier on later ambiguous events. Guidance is advisory only: it cannot widen the action allow-list or lower the supervisor's wake threshold, and there is a test for exactly that.
+**Dead code removed.** `DECISION_JSON_SCHEMA_HINT` (computed, never used), `count_runs_by_status` (never called; the dashboard buckets runs itself), the `scaffold_health` Stage 0 infrastructure probe (superseded by real activities), and the unused `RunStatus` union in the frontend.
 
-**Supervisor templates.** Standard, VIP/High-Touch, and Cost-Conscious, exposed at `GET /api/supervisors/templates` and loadable into the supervisor form. They differ in ways that show up in behaviour, not just labels: VIP wakes on everything and reviews every 20 minutes with no approval gate; Cost-Conscious wakes only on critical events, reviews every four hours, and cannot message the customer at all; Standard sits between them and holds customer contact for a human.
+**Fresh-setup verification, and a real bug it caught.** A clean checkout was made with `git archive`, installed from the lockfile, and tested. `uv sync --locked` resolved cleanly and 73 tests passed with 23 correctly skipped, which confirms the lockfile is complete. `.env.example` was audited against `app/config.py`: every setting the code reads is documented.
 
-**Continue-As-New.** Configurable per supervisor with `continue_as_new_after_events` (0 disables it, low values make it easy to demonstrate). The continuation carries only compact state and preserves order ID, run ID, and workflow ID, so it remains one logical run. It happens only at a quiet point: no queued events, no approved actions waiting, nothing pending a human, not paused, not terminal.
+That run also exposed a genuine defect. On a cold machine the first workflow test downloads the Temporal test-server binary — 33 seconds versus 3.5 afterwards — and the `wait_until` test helper only allowed a 5-second budget, so it failed spuriously. Anyone running the suite for the first time, including a grader, would have seen a red test on a healthy codebase. Both polling helpers now use a generous wall-clock budget and still return as soon as their predicate holds.
 
-New counters: `customer_actions`, `continuations`.
-
-### Two real bugs found and fixed
-
-1. **Events were dropped at the Continue-As-New boundary.** The carried state hard-coded `pending_events=[]`, and the persist call inside the continuation awaits, which yields and lets Signal handlers run — so an event arriving in that window was lost silently. The full-suite run caught it by timing: `delivered` vanished and the run reported two events instead of three. Queued events are now carried across. The seen-event-id tail was also being taken with `sorted(...)[-50:]`, which is lexicographic rather than chronological; the id store is now insertion-ordered so the carried tail is genuinely the most recent.
-2. **`completion_recommended` defaulted to `True`.** It has been wrong since Stage 2 (`de895af`) and I reported it as `False` at the time. It could not end a run — the workflow owns lifecycle, which is precisely why that separation matters — but any decision omitting the field would have falsely displayed "the agent recommended completion" to an operator. Now `False`, with a comment explaining that the absence of an opinion is not a recommendation.
-
-To make the first one testable rather than timing-dependent, the carried-state construction was extracted into a pure `_carried_state()` method and covered by a direct round-trip test against `_restore()`.
+**Documentation.** `README.md` was rewritten as a submission document: what the system is and why Temporal is the right tool, quick start, provider selection, how the wake policy, agent contract, approval gate, lifecycle authority, memory, persistence, and Continue-As-New actually work, the full API table, templates, the worker-restart procedure, how to run the tests, the repository layout, and an explicit list of known tradeoffs. `docs/DEMO.md` is new: a nine-step walkthrough with what to say at each step, a recording checklist, and a troubleshooting table. `docs/ARCHITECTURE.md` gained a closing section defending the design decisions and naming what would come next.
 
 ### Validation performed (2026-09-10)
 
 | Check | Result |
 | --- | --- |
-| Backend `pytest` with `RUN_INTEGRATION=1` | PASS: 96 passed, 0 skipped (run twice, stable) |
-| `pytest tests/test_p2.py` | PASS: 12 P2 tests (run three times, stable) |
+| Backend `pytest` with `RUN_INTEGRATION=1` | PASS: 96 passed, 0 skipped |
+| Fresh checkout: `uv sync --locked` then `pytest` | PASS: 73 passed, 23 skipped |
 | Backend `ruff check` / `ruff format --check` / `mypy` strict | PASS |
 | `alembic upgrade head` and `alembic check` | PASS: no drift |
 | Frontend `npm run lint` / `typecheck` / `build` | PASS |
-| Live end-to-end run on OpenRouter with a low CAN threshold | PASS: see below |
-| Browser check of the P2 UI | PASS: no console or page errors |
+| End-to-end regression against the running stack | PASS: 10 of 10 |
+| Browser check of every screen | PASS, including 400px with no overflow and no console errors |
 
-P2 tests cover: the three templates differing in wake sensitivity, review interval, allowed actions, and approval policy; templates referencing only real actions; guidance bounding, de-duplication, and length capping; guidance defaulting to empty and `completion_recommended` defaulting to false; guidance being recorded and reaching the classifier; guidance not widening the allow-list; Continue-As-New preserving state and identity; a continuation not re-running the start wake; a pending approval blocking a continuation until it is settled; Continue-As-New being off by default; the carried-state round trip losing nothing; and every event surviving a run that continues.
+The end-to-end regression ran against the full stack with the live OpenRouter provider and covered every path the demo relies on: Happy Path completing through a terminal event; Delivery Crisis escalating to `message_logistics_team`; routine events handled without waking the agent; terminate ending a sleeping run; the approval gate holding `message_customer` while non-gated actions still execute; a rejected action never executing; an approved action executing; analytics reporting approvals and customer actions; the three templates; and HTTP errors mapping to 404, 409, and 422.
 
-The live run used a VIP supervisor at `continue_as_new_after_events=2` against `anthropic/claude-sonnet-4.5`. It continued once mid-run with order state, memory, and counters intact; the agent generated three real guidance lines of its own ("Treat any delivery date risk as HIGH priority due to VIP status"); the run completed with 3 events, 4 wake-ups, 7 executed actions, 2 customer actions, 1 continuation, a 100% wake rate (correct for a HIGH-sensitivity supervisor), and 1.75 actions per wake. The persisted timeline held 31 rows across the continuation boundary, including `RUN_CONTINUED` and `WAKE_GUIDANCE_UPDATED`.
+One assertion in that harness was initially too strict — it expected zero executed actions while an approval was pending, but the live agent also proposed a non-gated internal note, which correctly executes. The check now asserts that the *gated* action specifically has not run.
+
+### Final state
+
+- 96 backend tests; strict mypy over 33 source files; zero lint errors.
+- Frontend builds clean; one known non-blocking PostCSS anonymous-default-export warning.
+- Four migrations, no schema drift.
+- Runs on the deterministic mock with no API key, or on a real model via OpenRouter or Anthropic.
 
 ### Known limitations
 
-- Only the OpenRouter provider has been exercised live; `ClaudeProvider` remains type-checked but unproven at runtime.
-- Analytics are per-run. There is no cross-run or per-supervisor aggregate view, which is what a real operations team would want next.
-- Guidance is replaced wholesale by each decision that emits it, rather than merged or aged out, so a later decision can quietly drop an earlier hint.
-- Continue-As-New carries the last 50 seen event ids. An extremely old duplicate arriving after several continuations would be reprocessed.
-- Templates are read-only presets in code. They cannot be edited or added through the UI, and existing supervisors cannot be edited at all.
-- The classifier still has no caching, and each ambiguous event costs a call.
-- No authentication anywhere; no pagination on the dashboard or supervisor list.
+Carried forward deliberately, and documented in the README:
 
-### Files and areas changed
+- Business actions are simulated.
+- Only the OpenRouter provider has been exercised against a live API; the Anthropic path is type-checked but unrun.
+- Memory compaction is deterministic truncation, not summarization.
+- The UI polls every two seconds rather than streaming.
+- No authentication, and no pagination on the dashboard or supervisor list.
+- The classifier has no caching, so a burst of customer messages means a burst of calls.
+- Analytics are per-run; there is no cross-run or per-supervisor view.
+- Approvals live in workflow state, so there is no cross-run approval queue, and they never time out.
+- Supervisors cannot be edited after creation; templates are read-only presets in code.
+- Continue-As-New carries the last 50 seen event ids, so a very old duplicate arriving after several continuations would be reprocessed.
+- The Temporal dev container runs as root to work around a root-owned named volume. Local development only.
+- `ORDER_PILOT_STAGED_BUILD_PROMPT.md` remains in already-pushed Git history.
 
-- Added: `backend/app/domain/templates.py`, `backend/migrations/versions/0003_wake_guidance.py`, `backend/tests/test_p2.py`.
-- Modified (backend): `app/agent/schema.py` (guidance field, `clean_guidance`, `completion_recommended` fix), `app/agent/prompt.py`, `app/temporal/activities.py` (guidance through the decision and snapshot contracts), `app/temporal/workflow.py` (guidance handling, Continue-As-New, `_carried_state`, ordered event ids, customer-action counter), `app/temporal/types.py` (`CarriedState`, CAN threshold), `app/models.py`, `app/repository.py`, `app/services/runs.py`, `app/api/schemas.py`, `app/api/runs.py` (analytics endpoint), `app/api/supervisors.py` (templates endpoint), `tests/test_api.py`.
-- Modified (frontend): `lib/types.ts`, `lib/api.ts`, `components/run-cards.tsx` (analytics and guidance cards), `app/runs/[runId]/page.tsx`, `app/supervisors/page.tsx` (template picker, CAN threshold).
-- Modified (docs): `README.md`, `docs/ARCHITECTURE.md`, this file.
+### Files and areas changed in Stage 7
 
-### Next stage
+- Added: `docs/DEMO.md`.
+- Rewritten: `README.md`.
+- Modified: `docs/ARCHITECTURE.md` (tradeoffs section), `.gitignore`, `backend/app/agent/schema.py`, `backend/app/repository.py`, `backend/app/temporal/worker.py`, `backend/tests/test_workflow.py`, `backend/tests/test_end_to_end.py`, `frontend/lib/types.ts`, this file.
+- Untracked: `ORDER_PILOT_STAGED_BUILD_PROMPT.md`.
 
-Stage 7 — Final hardening and submission readiness: full regression pass, remove dead code, verify a fresh setup from a clean clone, finalise the demo script and walkthrough checklist, and complete the documentation of workflow-versus-activity responsibilities, signals, queries, timers, memory, wake policy, approvals, and Continue-As-New.
+### Stage history
 
-**Stage 7 has NOT been started.**
+| Stage | Delivered |
+| --- | --- |
+| 0 | Scaffold, configuration, schema, Temporal connection |
+| 1 | `OrderSupervisorWorkflow`: Signals, Queries, durable timers, lifecycle rules |
+| 2 | Agent runtime: validated decisions, providers, five actions, memory |
+| 3 | Persistence and the FastAPI control plane |
+| 4 | Operations UI and event simulator — P0 complete |
+| 5 | Hybrid wake classifier, approval gate, durability demo — P1 complete |
+| 6 | Analytics, adaptive guidance, Continue-As-New, templates — P2 complete |
+| 7 | Hardening, fresh-setup verification, documentation, demo script |
+
+**All stages are complete. No further stage is planned.**

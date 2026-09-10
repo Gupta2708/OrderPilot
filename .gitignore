@@ -17,3 +17,8 @@ pytest-cache-files-*/
 htmlcov/
 .DS_Store
 artifacts/
+
+# Internal working documents; not part of the deliverable.
+ORDER_PILOT_STAGED_BUILD_PROMPT.md
+docs/DEMO.md
+PROJECT_CONTEXT.md

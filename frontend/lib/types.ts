@@ -1,11 +1,3 @@
-export type RunStatus =
-  | "PENDING"
-  | "ACTING"
-  | "SLEEPING"
-  | "PAUSED"
-  | "COMPLETED"
-  | "TERMINATED";
-
 export interface Supervisor {
   id: string;
   name: string;

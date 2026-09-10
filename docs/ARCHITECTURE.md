@@ -14,7 +14,7 @@ Temporal client -> Temporal service -> Python worker
                                   Workflow / Activities
 ```
 
-Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 added persistence and the FastAPI control plane. Stage 4 added the operations UI, completing P0. Stage 5 added the P1 layer: a hybrid wake policy, a human approval gate, and a demonstrated durability story. Stage 6 adds P2: analytics, adaptive wake guidance, Continue-As-New, and supervisor templates.
+Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 added persistence and the FastAPI control plane. Stage 4 added the operations UI, completing P0. Stage 5 added the P1 layer: a hybrid wake policy, a human approval gate, and a demonstrated durability story. Stage 6 added P2: analytics, adaptive wake guidance, Continue-As-New, and supervisor templates. Stage 7 is final hardening, documentation, and submission readiness.
 
 Activities contain LLM inference, business actions, memory compaction, final-summary generation, and database writes. Network and database operations stay outside replayed workflow code; the workflow performs no I/O at all. PostgreSQL holds the product-facing record — runs, unified timeline, memory, decisions, final outputs — while Temporal owns durable execution history. The two are deliberately separate: Temporal is the execution truth, Postgres is the product truth.
 
@@ -222,3 +222,21 @@ The worker registers `OrderSupervisorWorkflow` and one asynchronous infrastructu
 - [Temporal Python SDK](https://github.com/temporalio/sdk-python) and [Temporal CLI Docker setup](https://github.com/temporalio/cli/blob/main/README.md)
 
 Resolved dependency versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
+
+## Tradeoffs, and why
+
+A few choices were made deliberately and are worth defending rather than hiding.
+
+**Postgres and Temporal both hold state, on purpose.** Temporal owns execution truth; Postgres owns the product record. The duplication is real, but the alternative is worse: reading a completed run's timeline out of Temporal history couples the product to an execution engine's retention, and writing product state from the API would put two writers on the same run. The workflow is the single writer, and a persistence failure is non-fatal, because a reporting outage must not stop supervision.
+
+**The rule layer exists to avoid inference, not to encode the business.** It covers only events whose meaning is fixed by the domain, and defers anything genuinely ambiguous. That keeps the common path free while leaving judgement to the model where judgement is actually required.
+
+**The classifier never has the last word.** Its severity is capped by configuration, and any failure falls back to deterministic rules. A triage layer that can fail open into "wake for everything" or fail closed into "wake for nothing" would be worse than no classifier at all.
+
+**Memory is truncation, not summarization.** A summarising call per wake would add cost, latency, and non-determinism to every cycle, for a summary that is currently a handful of lines. It is the right call at this size and the wrong one at ten times it.
+
+**Polling in the UI, not streaming.** Two seconds against a local API is small and debuggable. Streaming would be the correct answer for many concurrent operators.
+
+**Actions are simulated.** The assignment permits it, and real integrations would add credentials and failure modes without demonstrating anything about durable orchestration.
+
+**What would come next**, in order: an approvals queue across runs rather than per-run state; cross-run analytics per supervisor; pagination and authentication; classifier caching for message bursts; editable supervisors; and exercising the Anthropic provider against a live key, since only the OpenRouter path has been proven at runtime.

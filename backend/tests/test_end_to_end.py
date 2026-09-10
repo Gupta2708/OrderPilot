@@ -6,6 +6,7 @@ Unlike the other suites this one commits, so it cleans up the rows it creates.
 
 import asyncio
 import os
+import time
 import uuid
 from typing import Any
 
@@ -28,15 +29,19 @@ pytestmark = pytest.mark.skipif(
 TASK_QUEUE = "orderpilot"  # must match settings so the API starts work the worker sees
 
 
-async def _wait_for(http: AsyncClient, run_id: str, predicate: Any, attempts: int = 100) -> Any:
+async def _wait_for(
+    http: AsyncClient, run_id: str, predicate: Any, timeout_seconds: float = 30.0
+) -> Any:
+    """Generous budget so a cold first run does not fail spuriously."""
     body: Any = None
-    for _ in range(attempts):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         response = await http.get(f"/api/runs/{run_id}")
         body = response.json()
         if predicate(body):
             return body
         await asyncio.sleep(0.1)
-    raise AssertionError(f"condition never became true; last body: {body}")
+    raise AssertionError(f"condition never became true within {timeout_seconds}s; last: {body}")
 
 
 async def _cleanup(session_factory: Any, run_id: uuid.UUID, supervisor_id: uuid.UUID) -> None:

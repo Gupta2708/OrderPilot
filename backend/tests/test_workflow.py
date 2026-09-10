@@ -6,6 +6,7 @@ downloaded on first use.
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -78,16 +79,23 @@ async def running_workflow(
 async def wait_until(
     handle: WorkflowHandle[Any, RunResult],
     predicate: Callable[[dict[str, Any]], bool],
-    attempts: int = 100,
+    timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
-    """Poll the workflow Query until the predicate holds."""
+    """Poll the workflow Query until the predicate holds.
+
+    The budget is generous on purpose: a first run on a cold machine downloads
+    the Temporal test-server binary, and a tight budget turns that one-off
+    delay into a spurious failure. This returns as soon as the predicate holds,
+    so a healthy run pays nothing for the headroom.
+    """
     state: dict[str, Any] = {}
-    for _ in range(attempts):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         state = await handle.query(OrderSupervisorWorkflow.state)
         if predicate(state):
             return state
         await asyncio.sleep(0.05)
-    raise AssertionError(f"condition never became true; last state: {state}")
+    raise AssertionError(f"condition never became true within {timeout_seconds}s; last: {state}")
 
 
 async def send_event(

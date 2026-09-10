@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -172,8 +172,3 @@ async def save_run_snapshot(
             )
             .on_conflict_do_nothing(constraint="uq_activities_run_id_seq")
         )
-
-
-async def count_runs_by_status(session: AsyncSession) -> dict[str, int]:
-    result = await session.execute(select(Run.status, func.count()).group_by(Run.status))
-    return {status: count for status, count in result.all()}

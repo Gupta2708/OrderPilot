@@ -183,15 +183,12 @@ def parse_decision(raw: str | dict[str, Any]) -> AgentDecisionModel:
     return AgentDecisionModel.model_validate(raw)
 
 
-DECISION_JSON_SCHEMA_HINT = AgentDecisionModel.model_json_schema()
-
 __all__ = [
     "ActionArguments",
     "MAX_GUIDANCE_ITEMS",
     "clean_guidance",
     "AgentDecisionModel",
     "WakeClassification",
-    "DECISION_JSON_SCHEMA_HINT",
     "MAX_ACTIONS_PER_DECISION",
     "ProposedActionModel",
     "SleepSpec",
