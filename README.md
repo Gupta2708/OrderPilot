@@ -25,38 +25,13 @@ A long-running AI supervisor for e-commerce orders. Each order gets **one durabl
 > **The engineering story is not "a chatbot for orders."**
 > It is a durable, event-driven supervisor whose lifecycle is owned by Temporal, with the AI as a component *inside* it rather than the thing in charge. Every design decision below follows from that.
 
-<table>
-<tr>
-<td width="25%" valign="top">
+| ⏱️ **Durable** | 💡 **Frugal** | 🔒 **Governed** | 🔍 **Auditable** |
+| :--- | :--- | :--- | :--- |
+| Survives worker restarts. Sleeps for days on a Temporal timer. Zero polling loops. | Routine events never reach the model. The wake rate is measured and shown. | Allow-list enforced three times. Sensitive actions held for a human. | Append-only timeline explains every wake, decision, and action. |
 
-**Durable**
+![Run Control Room](docs/images/control-room.png)
 
-Survives worker restarts. Sleeps for days on a Temporal timer. Zero polling loops.
-
-</td>
-<td width="25%" valign="top">
-
-**Frugal**
-
-Routine events never reach the model. The wake rate is measured and shown.
-
-</td>
-<td width="25%" valign="top">
-
-**Governed**
-
-Allow-list enforced three times. Sensitive actions held for a human.
-
-</td>
-<td width="25%" valign="top">
-
-**Auditable**
-
-Append-only timeline explains every wake, decision, and action.
-
-</td>
-</tr>
-</table>
+<div align="center"><sub>The Run Control Room — a held approval, the AI's decision, why it woke, and the order's live state.</sub></div>
 
 ---
 
@@ -79,103 +54,83 @@ Append-only timeline explains every wake, decision, and action.
 
 ```mermaid
 flowchart TB
-    subgraph client["Browser"]
-        UI["Next.js App Router + Tailwind<br/>dashboard · control room · event simulator"]
-    end
-
-    subgraph control["Control plane"]
-        API["FastAPI<br/>supervisors · runs · events · controls · approvals"]
-    end
-
-    subgraph durable["Durable execution"]
-        TS["Temporal service"]
-        WF["OrderSupervisorWorkflow<br/>deterministic · replay-safe · no I/O"]
-        ACT["Activities<br/>every side effect lives here"]
-    end
-
-    DB[("PostgreSQL<br/>supervisors · runs<br/>activity timeline · memory")]
+    UI["Next.js operations UI<br/>dashboard · control room · simulator"]
+    API["FastAPI control plane<br/>supervisors · runs · events · controls"]
+    TS["Temporal service"]
+    WF["OrderSupervisorWorkflow<br/>deterministic · no I/O"]
+    ACT["Activities<br/>every side effect lives here"]
+    DB[("PostgreSQL<br/>runs · timeline · memory")]
     LLM["LLM provider<br/>mock · OpenRouter · Anthropic"]
 
-    UI -->|"HTTP"| API
-    API -->|"reads: runs, timeline, memory, analytics"| DB
+    UI --> API
     API -->|"start workflow · Signals · Queries"| TS
-    TS <-->|"task queue"| WF
+    API -->|"reads"| DB
+    TS <--> WF
     WF -->|"execute_activity"| ACT
     ACT -->|"inference"| LLM
-    ACT -->|"persist snapshot + timeline"| DB
+    ACT -->|"persist"| DB
 
-    classDef front fill:#dbeafe,stroke:#1d4ed8,color:#17307a,stroke-width:1.5px
-    classDef api fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
-    classDef temporal fill:#cffafe,stroke:#0e7490,color:#0b4a5a,stroke-width:1.5px
-    classDef workflow fill:#ccfbf1,stroke:#0f766e,color:#0f3f3a,stroke-width:2.5px
-    classDef activity fill:#e0f2fe,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
-    classDef store fill:#f1f5f9,stroke:#64748b,color:#1e293b,stroke-width:1.5px
-    classDef model fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:1.5px
+    classDef ui fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:2px
+    classDef api fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:2px
+    classDef temporal fill:#cffafe,stroke:#0891b2,color:#0b4a5a,stroke-width:2px
+    classDef core fill:#99f6e4,stroke:#0f766e,color:#0f3f3a,stroke-width:3px
+    classDef act fill:#bae6fd,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
+    classDef store fill:#e2e8f0,stroke:#64748b,color:#1e293b,stroke-width:2px
+    classDef model fill:#ddd6fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
 
-    class UI front
+    class UI ui
     class API api
     class TS temporal
-    class WF workflow
-    class ACT activity
+    class WF core
+    class ACT act
     class DB store
     class LLM model
-
-    style client fill:#f8fafc,stroke:#cbd5e1,color:#334155
-    style control fill:#f8fafc,stroke:#cbd5e1,color:#334155
-    style durable fill:#f8fafc,stroke:#cbd5e1,color:#334155
 ```
 
 > [!NOTE]
-> **The one rule that shapes everything:** workflow code performs **no I/O**. Inference, action execution, memory compaction, database writes, and final-summary generation are all Activities with explicit timeouts and retry policies. That is what keeps replay deterministic while the work itself is not.
+> **The one rule that shapes everything:** workflow code performs **no I/O**. Inference, action execution, memory compaction, and database writes are all Activities with explicit timeouts and retry policies — which is what keeps replay deterministic while the work itself is not.
 
 ### The supervision loop
 
 ```mermaid
 flowchart TD
-    START(["Run created via API"]) --> W1["Wake 1 — workflow start"]
-    W1 --> DECIDE
+    IN["Signal arrives<br/>or the durable timer fires"] --> POLICY{"Wake policy"}
 
-    SLEEP{{"Durable sleep<br/>wait_condition + timer"}}
-    SLEEP -->|"Signal: order_event"| POLICY
-    SLEEP -->|"timer fires"| W3["Wake 3 — scheduled review"]
-    W3 --> DECIDE
+    POLICY -->|"routine event"| SKIP["Update order state only<br/>agent never consulted"]
+    POLICY -->|"needs attention"| AGENT["Agent Activity<br/>validated structured decision"]
 
-    POLICY{"Wake policy"}
-    POLICY -->|"routine event"| STATE["Update order state only<br/>agent never consulted"]
-    STATE --> TERM
-    POLICY -->|"important event"| W2["Wake 2 — important Signal"]
-    W2 --> DECIDE
+    AGENT --> GATE{"Action needs<br/>approval?"}
+    GATE -->|"no"| RUN["Execute allowed actions"]
+    GATE -->|"yes"| HOLD["Hold for a human"]
+    HOLD -->|"approved"| RUN
 
-    DECIDE["Agent Activity<br/>validated structured decision"]
-    DECIDE --> GATE{"Action needs<br/>approval?"}
-    GATE -->|"no"| RUN["Execute action Activities"]
-    GATE -->|"yes"| HOLD["Hold — AWAITING_APPROVAL"]
-    HOLD -->|"approve Signal"| RUN
-    HOLD -->|"reject Signal"| DROPPED["Recorded, never executed"]
-    RUN --> MEM["Update memory + timeline"]
-    DROPPED --> MEM
-    MEM --> TERM{"Terminal rule met?"}
-    TERM -->|"no"| SLEEP
-    TERM -->|"yes"| FINAL["Finalization Activity<br/>summary · learnings · recommendations"]
-    FINAL --> DONE(["COMPLETED / TERMINATED"])
+    RUN --> REC["Update memory + timeline"]
+    SKIP --> REC
+    REC --> TERM{"Terminal rule met?"}
 
-    classDef wake fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:1.5px
-    classDef decide fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
-    classDef branch fill:#fef3c7,stroke:#d97706,color:#713f12,stroke-width:2px
-    classDef terminal fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
-    classDef sleep fill:#e0f2fe,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
-    classDef step fill:#f1f5f9,stroke:#94a3b8,color:#1e293b,stroke-width:1.5px
-    classDef good fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1.5px
-    classDef endpoint fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
+    TERM -->|"no"| SLEEP["Durable sleep"]
+    SLEEP --> IN
+    TERM -->|"yes"| FINAL["Final summary<br/>learnings · recommendations"]
 
-    class W1,W2,W3 wake
-    class DECIDE decide
+    classDef entry fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:2px
+    classDef branch fill:#fde68a,stroke:#d97706,color:#713f12,stroke-width:2px
+    classDef ai fill:#ddd6fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
+    classDef quiet fill:#e2e8f0,stroke:#94a3b8,color:#334155,stroke-width:2px
+    classDef act fill:#bae6fd,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
+    classDef hold fill:#fed7aa,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef sleep fill:#99f6e4,stroke:#0f766e,color:#0f3f3a,stroke-width:2px
+    classDef done fill:#bbf7d0,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef rule fill:#fecaca,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+
+    class IN entry
     class POLICY,GATE branch
-    class TERM terminal
+    class AGENT ai
+    class SKIP quiet
+    class RUN,REC act
+    class HOLD hold
     class SLEEP sleep
-    class STATE,RUN,HOLD,DROPPED,MEM step
-    class FINAL good
-    class START,DONE endpoint
+    class TERM rule
+    class FINAL done
 ```
 
 ---
@@ -212,16 +167,7 @@ Temporal is the *execution* truth, Postgres the *product* truth. Reading a finis
 
 ### Code layout mirrors those boundaries
 
-```text
-backend/app/domain/      pure deterministic logic — no I/O, no clock, no randomness
-backend/app/agent/       decision contract, prompts, providers, action execution
-backend/app/temporal/    workflow, activities, worker, client, I/O contracts
-backend/app/services/    product operations mapped onto Temporal operations
-backend/app/api/         routers, schemas, dependencies — thin by design
-frontend/                dashboard · supervisors · start run · control room
-```
-
-`app/domain/` is pure on purpose: safe inside the workflow sandbox **and** testable without a Temporal server — which is why most wake-policy and lifecycle tests need no infrastructure at all.
+`app/domain/` holds pure deterministic logic — no I/O, no clock, no randomness — so it is safe inside the workflow sandbox **and** testable without a Temporal server. `app/temporal/` holds the workflow and activities, `app/services/` maps product operations onto Temporal ones, and `app/api/` stays thin.
 
 ### Data model
 
@@ -326,34 +272,28 @@ It only happens at a quiet point: never mid-event, never while an approval is pe
 
 ```mermaid
 flowchart LR
-    E["Event arrives"] --> A{"Known lifecycle<br/>event type?"}
+    E["Event arrives"] --> A{"Known<br/>event type?"}
     A -->|"yes"| T["Level A<br/>deterministic table<br/>free · instant"]
-    A -->|"unknown type or<br/>free-text customer message"| B["Level B<br/>lightweight classifier"]
-    B -->|"provider fails"| FB["Deterministic fallback"]
+    A -->|"unknown type or<br/>customer message"| B["Level B<br/>AI classifier"]
+    B -.->|"provider fails"| T
     T --> CAP{"Meets the supervisor's<br/>wake sensitivity?"}
     B --> CAP
-    FB --> CAP
-    CAP -->|"no"| NOWAKE["State updated<br/>agent not consulted"]
-    CAP -->|"yes"| WAKE["Wake the agent"]
-    NOWAKE --> REC["WAKE_DECISION recorded<br/>with the rule that decided"]
-    WAKE --> REC
+    CAP -->|"no"| NO["State updated<br/>agent not consulted"]
+    CAP -->|"yes"| YES["Wake the agent"]
 
-    classDef entry fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
-    classDef branch fill:#fef3c7,stroke:#d97706,color:#713f12,stroke-width:2px
-    classDef levelA fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
-    classDef levelB fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
-    classDef fallback fill:#f1f5f9,stroke:#94a3b8,color:#1e293b,stroke-width:1.5px
-    classDef quiet fill:#f1f5f9,stroke:#94a3b8,color:#334155,stroke-width:1.5px
-    classDef loud fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+    classDef entry fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:2px
+    classDef branch fill:#fde68a,stroke:#d97706,color:#713f12,stroke-width:2px
+    classDef a fill:#bbf7d0,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef b fill:#ddd6fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
+    classDef quiet fill:#e2e8f0,stroke:#94a3b8,color:#334155,stroke-width:2px
+    classDef loud fill:#fed7aa,stroke:#ea580c,color:#7c2d12,stroke-width:2px
 
     class E entry
     class A,CAP branch
-    class T levelA
-    class B levelB
-    class FB fallback
-    class NOWAKE quiet
-    class WAKE loud
-    class REC entry
+    class T a
+    class B b
+    class NO quiet
+    class YES loud
 ```
 
 **Level A** is a deterministic table over events whose meaning is fixed by the domain — `payment_failed`, `refund_requested`, `order_cancelled` are critical; `shipment_delayed`, `delivered`, `refund_completed` are high; `order_created`, `payment_confirmed`, `shipment_created` are low and normally update state without waking the agent. This path is free and runs first.
@@ -408,15 +348,11 @@ A run ends only through workflow rules: a terminal event (`delivered`, `refund_c
 
 This is tested **adversarially**: a stub provider that recommends completion on *every* decision still cannot finish a run — only a later `delivered` event does.
 
-### Memory and context
+### Memory, context, and adaptive guidance
 
-Memory is a compact rolling summary with a line cap and a marker for what was compacted away. Each decision's context is assembled from the supervisor instruction, live run instructions, structured order state, memory, the triggering event, the wake evaluation, a small recent-activity window, and the allowed actions. **Full history is never sent.**
+Memory is a compact rolling summary with a line cap and a marker for what was compacted away. Each decision's context is assembled from the supervisor instruction, live run instructions, order state, memory, the triggering event, the wake evaluation, a short recent-activity window, and the allowed actions — **full history is never sent**.
 
-### Adaptive wake guidance
-
-The agent may emit up to three short standing hints, which are cleaned, de-duplicated, length-capped, persisted, and fed to later classifications. Advisory input to triage **only** — it cannot widen the allow-list or lower the wake threshold.
-
----
+The agent may also emit up to three standing wake hints, which are cleaned, capped, persisted, and fed to later classifications. Advisory input to triage only: guidance cannot widen the allow-list or lower the wake threshold.
 
 ## The product, end to end
 
@@ -469,18 +405,21 @@ The product works **with no API key at all**. `LLM_PROVIDER` selects the backend
 | `openrouter` | Real model via OpenRouter (OpenAI-compatible). Needs `OPENROUTER_API_KEY`; defaults to `anthropic/claude-sonnet-4.5`. |
 | `claude` | Real model via the Anthropic API. Needs `ANTHROPIC_API_KEY`; defaults to `claude-opus-5`. |
 
-Set the key in `.env`, which is gitignored. **The test suite forces the mock provider**, so tests never make a paid call regardless of local configuration. The mock is not merely a test double — it reuses the same deterministic policy the workflow was proven against, so the whole product can be demonstrated without a key.
+Set the key in `.env`, which is gitignored. **The test suite forces the mock provider**, so tests never make a paid call regardless of local configuration.
 
 ### The screens
 
-| Screen | What it shows |
-| :--- | :--- |
-| **Dashboard** | Every supervised order bucketed by what it is doing — acting, sleeping, needs attention, completed — with next wake, last wake, and counters |
-| **Supervisors** | Three templates that differ in *behaviour*, plus full configuration: instruction, allowed actions, wake sensitivity, review interval, approval policy, Continue-As-New threshold |
-| **Start run** | Order ID, order context, supervisor choice, and an optional instruction scoped to this run alone |
-| **Run Control Room** | The main screen: status and countdown, structured order state, compact memory, the latest decision *and the wake decision behind it*, adaptive guidance, pending approvals, unified timeline, action history, event simulator, live controls, and the final output |
+**Dashboard** — every supervised order bucketed by what it is doing, with countdowns and live counters.
 
-**Supervisor templates**
+![Dashboard](docs/images/dashboard.png)
+
+**Run Control Room** — shown at the top of this README. Below the fold: the order's memory, the agent's own standing guidance, and the full record as tabs.
+
+![Timeline and analytics](docs/images/timeline.png)
+
+**Supervisors** — three templates that differ in behaviour, not labels, plus the full policy form.
+
+![Supervisors](docs/images/supervisors.png)
 
 | Template | Wake sensitivity | Review | Distinctive behaviour |
 | :--- | :--- | :--- | :--- |
@@ -488,7 +427,11 @@ Set the key in `.env`, which is gitignored. **The test suite forces the mock pro
 | **VIP / High-Touch** | `HIGH` | 20m | Trusted to contact the customer directly |
 | **Cost-Conscious** | `LOW` | 240m | **Cannot** message the customer at all |
 
-**Event simulator** — drives an order forward one event at a time, with the four assignment scenarios (Happy Path · Payment Trouble · Delivery Crisis · Refund Risk) plus arbitrary injection *including an unrecognised event type*, so unknown-event escalation can be demonstrated.
+**Start run** — a four-step wizard: order → supervisor → instructions → launch.
+
+![Start a run](docs/images/start-run.png)
+
+**Event simulator** — drives an order forward one event at a time, with the four assignment scenarios plus arbitrary injection *including an unrecognised event type*.
 
 ### A ten-minute walkthrough
 
@@ -558,7 +501,7 @@ Set-Location frontend
 npm run lint; npm run typecheck; npm run build
 ```
 
-**96 tests.** Workflow behaviour runs against Temporal's **time-skipping test server**, so durable timers are exercised without waiting in real time; the durability test uses a real dev server because it deliberately leaves the task queue unattended. *(The first run downloads a test-server binary.)*
+**96 tests.** Workflow behaviour runs against Temporal's **time-skipping test server**, so durable timers are exercised without waiting in real time. *(The first run downloads a test-server binary.)*
 
 What is actually **guaranteed**, beyond the happy paths:
 
@@ -588,13 +531,10 @@ Deliberate choices for a POC, stated plainly rather than hidden.
 | **Business actions are simulated** | They validate input, return structured results, and are recorded — but send nothing. Real integrations add credentials and failure modes without demonstrating anything about durable orchestration |
 | **Memory is truncation, not summarization** | A summarising call per wake adds cost, latency, and non-determinism for a summary that is a handful of lines. Right at this size, wrong at ten times it |
 | **The UI polls every two seconds** | Small and debuggable locally; streaming is the correct answer for many concurrent operators |
-| **No authentication, no pagination** | Anyone who can reach the API can control any run |
-| **The classifier has no caching** | A burst of customer messages means a burst of calls |
-| **Analytics are per-run** | No cross-run or per-supervisor aggregate view |
 | **Only OpenRouter proven live** | The Anthropic path is type-checked and follows the SDK's structured-output contract, but has not been run |
-| **Supervisors cannot be edited** | Templates are read-only presets in code |
-| **Approvals never time out** | They live in workflow state, so there is no cross-run approval queue |
-| **Temporal dev container runs as root** | Works around a root-owned named volume. Local development only |
+| **No auth, no pagination, no classifier caching** | Anyone who can reach the API can control any run, the dashboard lists every run, and a burst of customer messages means a burst of calls |
+
+Also: analytics are per-run only, supervisors cannot be edited after creation, approvals never time out, and the Temporal dev container runs as root to work around a root-owned volume (local development only).
 
 **What would come next, in order:** an approvals queue across runs → cross-run analytics → pagination and authentication → classifier caching → editable supervisors → exercising the Anthropic provider against a live key.
 
@@ -604,6 +544,6 @@ Deliberate choices for a POC, stated plainly rather than hidden.
 
 **[Architecture deep-dive](docs/ARCHITECTURE.md)** · **[Build & verification record](PROJECT_STATUS.md)**
 
-<sub>Built as a staged POC. Every stage was validated before the next began — see <code>PROJECT_STATUS.md</code> for what was verified and how.</sub>
+<sub>Built as a staged POC. Every stage was validated before the next began.</sub>
 
 </div>
