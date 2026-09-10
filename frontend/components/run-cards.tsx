@@ -1,124 +1,136 @@
 "use client";
 
+import { motion } from "framer-motion";
+import type { LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  Ban,
+  BellRing,
+  BrainCircuit,
+  CheckCircle2,
+  Copy,
+  CreditCard,
+  Flag,
+  Gauge,
+  History,
+  Inbox,
+  ListTree,
+  MessageSquare,
+  Moon,
+  NotebookPen,
+  Package,
+  PauseCircle,
+  PlayCircle,
+  Rocket,
+  ShieldCheck,
+  ShieldX,
+  Sparkles,
+  Truck,
+  XCircle,
+} from "lucide-react";
 import { formatTime, titleCase } from "@/lib/format";
-import type {
-  ActivityEntry,
-  AgentDecision,
-  FinalOutput,
-  OrderState,
-  PendingApproval,
-  RunAnalytics,
-  WakeDecision,
-} from "@/lib/types";
-import { Button, Card, EmptyState, SeverityBadge } from "@/components/ui";
+import type { ActivityEntry, OrderState, RunAnalytics } from "@/lib/types";
+import { Card, Chip, EmptyState, cx } from "@/components/ui";
 
-const STATE_TONE: Record<string, string> = {
-  confirmed: "text-emerald-700",
-  delivered: "text-emerald-700",
-  completed: "text-emerald-700",
-  shipped: "text-emerald-700",
-  created: "text-sky-700",
-  ready_to_pick: "text-sky-700",
-  failed: "text-rose-700",
-  delayed: "text-orange-700",
-  requested: "text-orange-700",
-  cancelled: "text-rose-700",
+/* -------------------------------------------------------- order lifecycle */
+
+type StageTone = "done" | "active" | "risk" | "idle";
+
+const STAGE_TONE: Record<StageTone, { ring: string; dot: string; text: string }> = {
+  done: { ring: "ring-emerald-200 bg-emerald-50", dot: "bg-emerald-500", text: "text-emerald-800" },
+  active: { ring: "ring-brand-200 bg-brand-50", dot: "bg-brand-500", text: "text-brand-800" },
+  risk: { ring: "ring-orange-200 bg-orange-50", dot: "bg-orange-500", text: "text-orange-800" },
+  idle: { ring: "ring-ink-200 bg-ink-50", dot: "bg-ink-300", text: "text-ink-500" },
 };
 
-export function OrderStateCard({ state }: { state: OrderState }) {
-  const rows: [string, string][] = [
-    ["Payment", state.payment?.status ?? "—"],
-    ["Fulfillment", state.fulfillment?.status ?? "—"],
-    ["Shipment", state.shipment?.status ?? "—"],
-    ["Delivery", state.delivery?.status ?? "—"],
-    ["Refund", state.refund?.status ?? "—"],
+const RISK_VALUES = new Set(["failed", "delayed", "requested", "cancelled"]);
+const DONE_VALUES = new Set([
+  "confirmed",
+  "delivered",
+  "completed",
+  "shipped",
+  "ready_to_pick",
+  "created",
+]);
+
+function toneFor(value: string): StageTone {
+  if (RISK_VALUES.has(value)) return "risk";
+  if (DONE_VALUES.has(value)) return "done";
+  if (value === "pending" || value === "not_started" || value === "not_created" || value === "none")
+    return "idle";
+  return "active";
+}
+
+/** The order's own progress, as a stepper rather than a list of key/values. */
+export function OrderLifecycle({ state }: { state: OrderState }) {
+  const stages: Array<{
+    label: string;
+    value: string;
+    icon: LucideIcon;
+    note?: string | null;
+  }> = [
+    {
+      label: "Payment",
+      value: state.payment?.status ?? "—",
+      icon: CreditCard,
+      note: state.payment?.reason,
+    },
+    { label: "Fulfillment", value: state.fulfillment?.status ?? "—", icon: Package },
+    {
+      label: "Shipment",
+      value: state.shipment?.status ?? "—",
+      icon: Truck,
+      note: state.shipment?.delay_reason,
+    },
+    { label: "Delivery", value: state.delivery?.status ?? "—", icon: Flag },
+    { label: "Refund", value: state.refund?.status ?? "—", icon: Ban, note: state.refund?.reason },
   ];
-  return (
-    <Card title="Order state" subtitle="Structured, not inferred from memory">
-      <dl className="space-y-1.5">
-        {rows.map(([label, value]) => (
-          <div key={label} className="flex items-center justify-between gap-3 text-sm">
-            <dt className="text-slate-500">{label}</dt>
-            <dd className={`font-medium ${STATE_TONE[value] ?? "text-slate-800"}`}>
-              {titleCase(value)}
-            </dd>
-          </div>
-        ))}
-      </dl>
-      {state.customer?.last_message && (
-        <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-600">
-          <span className="font-medium text-slate-500">Last customer message: </span>
-          &ldquo;{state.customer.last_message}&rdquo;
-        </p>
-      )}
-    </Card>
-  );
-}
 
-export function DecisionCard({ decision }: { decision: AgentDecision | null }) {
   return (
     <Card
-      title="Latest decision"
-      subtitle={decision ? `Triggered by ${titleCase(decision.trigger)}` : undefined}
-      action={decision ? <SeverityBadge severity={decision.priority} /> : undefined}
+      title="Order lifecycle"
+      subtitle="Structured state, never inferred from prose"
+      icon={Package}
     >
-      {!decision ? (
-        <EmptyState>No decision yet.</EmptyState>
-      ) : (
-        <div className="space-y-2.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-700">
-              {decision.decision}
-            </span>
-            <span className="text-[11px] text-slate-500">
-              via {decision.provider} · next review in {decision.sleep_minutes}m
-            </span>
-          </div>
-          <p className="text-sm leading-6 text-slate-700">{decision.reason_summary}</p>
-          {decision.actions.length > 0 && (
-            <ul className="space-y-1">
-              {decision.actions.map((action, index) => (
-                <li key={`${action.tool}-${index}`} className="text-xs text-slate-600">
-                  → <span className="font-medium">{titleCase(action.tool)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {decision.completion_recommended && (
-            <p className="rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
-              The agent recommended completion. The workflow decides whether the run actually ends.
-            </p>
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-export function WakeCard({ wake }: { wake: WakeDecision | null }) {
-  return (
-    <Card
-      title="Wake decision"
-      subtitle="Why the main agent was, or was not, woken"
-      action={wake ? <SeverityBadge severity={wake.severity} /> : undefined}
-    >
-      {!wake ? (
-        <EmptyState>No events evaluated yet.</EmptyState>
-      ) : (
-        <div className="space-y-2">
-          <p className="text-sm">
-            <span
-              className={`font-semibold ${wake.wake_now ? "text-orange-700" : "text-slate-600"}`}
+      <div className="grid gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
+        {stages.map((stage, index) => {
+          const tone = STAGE_TONE[toneFor(stage.value)];
+          return (
+            <motion.div
+              key={stage.label}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.05, duration: 0.3 }}
+              className={cx(
+                "rounded-lg p-2.5 ring-1 ring-inset transition-transform duration-200 hover:-translate-y-0.5",
+                tone.ring,
+              )}
             >
-              {wake.wake_now ? "Woke the agent" : "Handled without waking"}
-            </span>
-            {wake.event_type && (
-              <span className="text-slate-500"> · {titleCase(wake.event_type)}</span>
-            )}
-          </p>
-          <p className="text-sm leading-6 text-slate-700">{wake.reason}</p>
-          <p className="text-[11px] text-slate-500">
-            {wake.category} · rule: {wake.rule}
+              <div className="flex items-center gap-1.5">
+                <stage.icon className={cx("h-3.5 w-3.5", tone.text)} strokeWidth={2.2} />
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+                  {stage.label}
+                </p>
+              </div>
+              <p className={cx("mt-1 flex items-center gap-1.5 text-sm font-semibold", tone.text)}>
+                <span className={cx("h-1.5 w-1.5 rounded-full", tone.dot)} />
+                {titleCase(stage.value)}
+              </p>
+              {stage.note && (
+                <p className="mt-0.5 truncate text-[10px] text-ink-500" title={stage.note}>
+                  {stage.note}
+                </p>
+              )}
+            </motion.div>
+          );
+        })}
+      </div>
+      {state.customer?.last_message && (
+        <div className="mt-3 flex gap-2 border-t border-ink-100 pt-3">
+          <MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-400" strokeWidth={2.2} />
+          <p className="text-xs leading-5 text-ink-600">
+            <span className="font-medium text-ink-500">Last customer message: </span>
+            &ldquo;{state.customer.last_message}&rdquo;
           </p>
         </div>
       )}
@@ -126,48 +138,95 @@ export function WakeCard({ wake }: { wake: WakeDecision | null }) {
   );
 }
 
-export function MemoryCard({ memory }: { memory: string }) {
-  const lines = memory.split("\n").filter(Boolean);
-  return (
-    <Card title="Compact memory" subtitle="Rolling summary, not full history">
-      {lines.length === 0 ? (
-        <EmptyState>Nothing recorded yet.</EmptyState>
-      ) : (
-        <ul className="space-y-1.5">
-          {lines.map((line, index) => (
-            <li key={index} className="text-sm leading-6 text-slate-700">
-              {line}
-            </li>
-          ))}
-        </ul>
-      )}
-    </Card>
-  );
-}
+/* --------------------------------------------------------------- timeline */
 
-const TIMELINE_TONE: Record<string, string> = {
-  AGENT_DECISION: "bg-teal-500",
-  ACTION_EXECUTED: "bg-emerald-500",
-  ACTION_FAILED: "bg-rose-500",
-  ACTION_REJECTED: "bg-rose-400",
-  ACTION_PENDING_APPROVAL: "bg-amber-400",
-  ACTION_APPROVED: "bg-emerald-500",
-  ACTION_DENIED: "bg-rose-500",
-  WAKE_GUIDANCE_UPDATED: "bg-indigo-400",
-  RUN_CONTINUED: "bg-violet-500",
-  EVENT_RECEIVED: "bg-sky-500",
-  EVENT_REJECTED: "bg-rose-400",
-  EVENT_DUPLICATE_IGNORED: "bg-slate-300",
-  WAKE_DECISION: "bg-amber-500",
-  SLEEP_SCHEDULED: "bg-slate-300",
-  MEMORY_UPDATED: "bg-slate-300",
-  INSTRUCTION_ADDED: "bg-indigo-500",
-  RUN_PAUSED: "bg-slate-400",
-  RUN_RESUMED: "bg-slate-400",
-  RUN_TERMINATED: "bg-rose-600",
-  RUN_COMPLETED: "bg-emerald-600",
-  FINAL_OUTPUT: "bg-emerald-600",
-  RUN_STARTED: "bg-teal-600",
+type TimelineStyle = { icon: LucideIcon; dot: string; ring: string; category: string };
+
+const TIMELINE: Record<string, TimelineStyle> = {
+  RUN_STARTED: { icon: Rocket, dot: "bg-brand-600", ring: "ring-brand-200", category: "Lifecycle" },
+  EVENT_RECEIVED: { icon: Inbox, dot: "bg-sky-500", ring: "ring-sky-200", category: "Event" },
+  EVENT_REJECTED: {
+    icon: AlertTriangle,
+    dot: "bg-rose-400",
+    ring: "ring-rose-200",
+    category: "Event",
+  },
+  EVENT_DUPLICATE_IGNORED: {
+    icon: Copy,
+    dot: "bg-ink-300",
+    ring: "ring-ink-200",
+    category: "Event",
+  },
+  WAKE_DECISION: { icon: BellRing, dot: "bg-amber-500", ring: "ring-amber-200", category: "Triage" },
+  AGENT_DECISION: {
+    icon: BrainCircuit,
+    dot: "bg-violet-500",
+    ring: "ring-violet-200",
+    category: "AI",
+  },
+  ACTION_EXECUTED: {
+    icon: CheckCircle2,
+    dot: "bg-emerald-500",
+    ring: "ring-emerald-200",
+    category: "Action",
+  },
+  ACTION_FAILED: { icon: XCircle, dot: "bg-rose-500", ring: "ring-rose-200", category: "Action" },
+  ACTION_REJECTED: { icon: ShieldX, dot: "bg-rose-400", ring: "ring-rose-200", category: "Action" },
+  ACTION_PENDING_APPROVAL: {
+    icon: ShieldCheck,
+    dot: "bg-orange-500",
+    ring: "ring-orange-200",
+    category: "Approval",
+  },
+  ACTION_APPROVED: {
+    icon: CheckCircle2,
+    dot: "bg-emerald-500",
+    ring: "ring-emerald-200",
+    category: "Approval",
+  },
+  ACTION_DENIED: { icon: ShieldX, dot: "bg-rose-500", ring: "ring-rose-200", category: "Approval" },
+  MEMORY_UPDATED: {
+    icon: NotebookPen,
+    dot: "bg-ink-300",
+    ring: "ring-ink-200",
+    category: "Memory",
+  },
+  SLEEP_SCHEDULED: { icon: Moon, dot: "bg-sky-400", ring: "ring-sky-200", category: "Sleep" },
+  INSTRUCTION_ADDED: {
+    icon: MessageSquare,
+    dot: "bg-indigo-500",
+    ring: "ring-indigo-200",
+    category: "Operator",
+  },
+  RUN_PAUSED: { icon: PauseCircle, dot: "bg-ink-400", ring: "ring-ink-200", category: "Control" },
+  RUN_RESUMED: { icon: PlayCircle, dot: "bg-ink-400", ring: "ring-ink-200", category: "Control" },
+  RUN_TERMINATED: { icon: Ban, dot: "bg-rose-600", ring: "ring-rose-200", category: "Lifecycle" },
+  RUN_COMPLETED: {
+    icon: CheckCircle2,
+    dot: "bg-emerald-600",
+    ring: "ring-emerald-200",
+    category: "Lifecycle",
+  },
+  FINAL_OUTPUT: { icon: Flag, dot: "bg-emerald-600", ring: "ring-emerald-200", category: "Lifecycle" },
+  WAKE_GUIDANCE_UPDATED: {
+    icon: Sparkles,
+    dot: "bg-violet-400",
+    ring: "ring-violet-200",
+    category: "AI",
+  },
+  RUN_CONTINUED: {
+    icon: History,
+    dot: "bg-fuchsia-500",
+    ring: "ring-fuchsia-200",
+    category: "Lifecycle",
+  },
+};
+
+const FALLBACK: TimelineStyle = {
+  icon: ListTree,
+  dot: "bg-ink-300",
+  ring: "ring-ink-200",
+  category: "Event",
 };
 
 function summarise(entry: ActivityEntry): string {
@@ -185,36 +244,64 @@ function summarise(entry: ActivityEntry): string {
   );
 }
 
+/** One event in the vertical timeline. */
+export function TimelineEventCard({ entry, isLast }: { entry: ActivityEntry; isLast: boolean }) {
+  const style = TIMELINE[entry.type] ?? FALLBACK;
+  const Icon = style.icon;
+  const summary = summarise(entry);
+  return (
+    <li className="relative flex gap-3 pb-3.5 last:pb-0">
+      {!isLast && (
+        <span className="absolute bottom-0 left-[13px] top-7 w-px bg-ink-200" aria-hidden />
+      )}
+      <span
+        className={cx(
+          "relative z-10 mt-0.5 grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full bg-white ring-2 ring-inset",
+          style.ring,
+        )}
+      >
+        <Icon className="h-3.5 w-3.5 text-ink-600" strokeWidth={2.2} />
+      </span>
+      <div className="min-w-0 flex-1 rounded-lg px-2 py-1 transition-colors duration-150 hover:bg-ink-50">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+          <p className="text-xs font-semibold text-ink-800">{titleCase(entry.type)}</p>
+          <time className="tnum shrink-0 text-[10px] text-ink-400">
+            {formatTime(entry.created_at)}
+          </time>
+        </div>
+        <div className="mt-0.5 flex items-center gap-1.5">
+          <span className={cx("h-1 w-1 rounded-full", style.dot)} />
+          <span className="text-[10px] font-medium uppercase tracking-wide text-ink-400">
+            {style.category}
+          </span>
+        </div>
+        {summary && <p className="mt-1 break-words text-xs leading-5 text-ink-600">{summary}</p>}
+      </div>
+    </li>
+  );
+}
+
 export function TimelineCard({ entries }: { entries: ActivityEntry[] }) {
   const ordered = [...entries].sort((a, b) => b.seq - a.seq);
   return (
-    <Card title="Unified timeline" subtitle={`${entries.length} entries, newest first`}>
+    <Card
+      title="Unified timeline"
+      subtitle={`${entries.length} entries, newest first`}
+      icon={ListTree}
+      bodyClassName="px-3 py-3"
+    >
       {ordered.length === 0 ? (
-        <EmptyState>Nothing has happened yet.</EmptyState>
+        <EmptyState icon={ListTree} title="Nothing has happened yet">
+          Every wake, decision, and action will appear here as it happens.
+        </EmptyState>
       ) : (
-        <ol className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
-          {ordered.map((entry) => (
-            <li key={entry.seq} className="flex gap-2.5">
-              <span
-                className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
-                  TIMELINE_TONE[entry.type] ?? "bg-slate-300"
-                }`}
-                aria-hidden
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between gap-2">
-                  <p className="text-xs font-semibold text-slate-800">{titleCase(entry.type)}</p>
-                  <time className="shrink-0 text-[11px] tabular-nums text-slate-400">
-                    {formatTime(entry.created_at)}
-                  </time>
-                </div>
-                {summarise(entry) && (
-                  <p className="mt-0.5 break-words text-xs leading-5 text-slate-600">
-                    {summarise(entry)}
-                  </p>
-                )}
-              </div>
-            </li>
+        <ol className="scroll-slim max-h-[30rem] overflow-y-auto pr-1">
+          {ordered.map((entry, index) => (
+            <TimelineEventCard
+              key={entry.seq}
+              entry={entry}
+              isLast={index === ordered.length - 1}
+            />
           ))}
         </ol>
       )}
@@ -222,35 +309,41 @@ export function TimelineCard({ entries }: { entries: ActivityEntry[] }) {
   );
 }
 
+/* --------------------------------------------------------- action history */
+
 export function ActionHistoryCard({ entries }: { entries: ActivityEntry[] }) {
   const actions = entries.filter(
     (entry) => entry.type === "ACTION_EXECUTED" || entry.type === "ACTION_FAILED",
   );
   return (
-    <Card title="Action history" subtitle={`${actions.length} executed`}>
+    <Card title="Action history" subtitle={`${actions.length} executed`} icon={History}>
       {actions.length === 0 ? (
-        <EmptyState>No actions taken yet.</EmptyState>
+        <EmptyState icon={History} title="No actions taken yet">
+          Actions appear once the agent decides one is warranted.
+        </EmptyState>
       ) : (
-        <ul className="space-y-2">
+        <ul className="scroll-slim max-h-[30rem] space-y-2 overflow-y-auto pr-1">
           {actions.map((entry) => {
             const payload = entry.payload as { tool?: string; detail?: string; ok?: boolean };
             return (
-              <li key={entry.seq} className="rounded-md border border-slate-100 bg-slate-50 p-2">
+              <li
+                key={entry.seq}
+                className={cx(
+                  "rounded-lg border p-2.5 transition-colors duration-150",
+                  payload.ok
+                    ? "border-ink-200 bg-white hover:border-emerald-200 hover:bg-emerald-50/40"
+                    : "border-rose-200 bg-rose-50/50",
+                )}
+              >
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold text-slate-800">
+                  <p className="text-xs font-semibold text-ink-800">
                     {titleCase(payload.tool ?? "action")}
                   </p>
-                  <span
-                    className={`text-[11px] font-medium ${
-                      payload.ok ? "text-emerald-700" : "text-rose-700"
-                    }`}
-                  >
-                    {payload.ok ? "ok" : "failed"}
-                  </span>
+                  <Chip tone={payload.ok ? "success" : "danger"}>
+                    {payload.ok ? "sent" : "failed"}
+                  </Chip>
                 </div>
-                <p className="mt-0.5 break-words text-xs leading-5 text-slate-600">
-                  {payload.detail}
-                </p>
+                <p className="mt-1 break-words text-xs leading-5 text-ink-600">{payload.detail}</p>
               </li>
             );
           })}
@@ -260,125 +353,7 @@ export function ActionHistoryCard({ entries }: { entries: ActivityEntry[] }) {
   );
 }
 
-export function FinalOutputCard({ output }: { output: FinalOutput }) {
-  return (
-    <Card
-      title="Final output"
-      subtitle={`Run ended: ${titleCase(output.terminal_reason)}`}
-      className="border-emerald-200"
-    >
-      <div className="space-y-3">
-        <p className="text-sm leading-6 text-slate-700">{output.final_summary}</p>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Key learnings
-            </h3>
-            <ul className="mt-1 list-disc space-y-1 pl-4 text-sm text-slate-700">
-              {output.learnings.map((item, index) => (
-                <li key={index}>{item}</li>
-              ))}
-            </ul>
-          </div>
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Recommendations
-            </h3>
-            <ul className="mt-1 list-disc space-y-1 pl-4 text-sm text-slate-700">
-              {output.recommendations.map((item, index) => (
-                <li key={index}>{item}</li>
-              ))}
-            </ul>
-          </div>
-        </div>
-
-        {output.important_actions.length > 0 && (
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Important actions
-            </h3>
-            <ul className="mt-1 space-y-1 text-sm text-slate-700">
-              {output.important_actions.map((action, index) => (
-                <li key={index}>{titleCase(String((action as { tool?: string }).tool ?? ""))}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-export function ApprovalsCard({
-  approvals,
-  busy,
-  onApprove,
-  onReject,
-}: {
-  approvals: PendingApproval[];
-  busy: boolean;
-  onApprove: (approvalId: string) => void;
-  onReject: (approvalId: string) => void;
-}) {
-  if (approvals.length === 0) return null;
-  return (
-    <Card
-      title="Awaiting approval"
-      subtitle="These actions will not run until a human decides"
-      className="border-amber-300 bg-amber-50/40"
-    >
-      <ul className="space-y-3">
-        {approvals.map((approval) => (
-          <li
-            key={approval.approval_id}
-            className="rounded-md border border-amber-200 bg-white p-3"
-          >
-            <p className="text-sm font-semibold text-slate-900">{titleCase(approval.tool)}</p>
-            {typeof approval.arguments.message === "string" && (
-              <p className="mt-1 text-sm leading-6 text-slate-700">
-                &ldquo;{approval.arguments.message}&rdquo;
-              </p>
-            )}
-            <p className="mt-1 text-[11px] text-slate-500">
-              Requested {formatTime(approval.requested_at)}
-            </p>
-            <div className="mt-2 flex gap-2">
-              <Button disabled={busy} onClick={() => onApprove(approval.approval_id)}>
-                Approve
-              </Button>
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() => onReject(approval.approval_id)}
-              >
-                Reject
-              </Button>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-export function GuidanceCard({ guidance }: { guidance: string[] }) {
-  if (guidance.length === 0) return null;
-  return (
-    <Card
-      title="Adaptive wake guidance"
-      subtitle="Set by the agent; advises triage, never widens permissions"
-    >
-      <ul className="space-y-1.5">
-        {guidance.map((line, index) => (
-          <li key={index} className="text-sm leading-6 text-slate-700">
-            • {line}
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
+/* -------------------------------------------------------------- analytics */
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
@@ -388,9 +363,28 @@ function formatDuration(seconds: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
+function Meter({ value, tone }: { value: number; tone: string }) {
+  return (
+    <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-ink-100">
+      <motion.div
+        initial={{ width: 0 }}
+        animate={{ width: `${Math.min(100, Math.max(0, value))}%` }}
+        transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+        className={cx("h-full rounded-full", tone)}
+      />
+    </div>
+  );
+}
+
 export function AnalyticsCard({ analytics }: { analytics: RunAnalytics | null }) {
-  if (!analytics) return null;
-  const rows: [string, string | number][] = [
+  if (!analytics) {
+    return (
+      <Card title="Run analytics" subtitle="What this supervisor actually did" icon={Gauge}>
+        <EmptyState icon={Gauge}>Analytics appear once the run has started.</EmptyState>
+      </Card>
+    );
+  }
+  const rows: Array<[string, number | string]> = [
     ["Events received", analytics.events_received],
     ["Agent wake-ups", analytics.agent_wakeups],
     ["Handled without waking", analytics.no_wake_events],
@@ -403,32 +397,37 @@ export function AnalyticsCard({ analytics }: { analytics: RunAnalytics | null })
     ["Continuations", analytics.continuations],
     ["Run duration", formatDuration(analytics.duration_seconds)],
   ];
+  const wakePct = Math.round(analytics.wake_rate * 100);
   return (
-    <Card title="Run analytics" subtitle="What this supervisor actually did">
-      <dl className="space-y-1.5">
+    <Card title="Run analytics" subtitle="What this supervisor actually did" icon={Gauge}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg bg-ink-50 p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+            Wake rate
+          </p>
+          <p className="tnum mt-0.5 text-2xl font-semibold leading-none text-ink-900">{wakePct}%</p>
+          <Meter value={wakePct} tone="bg-brand-500" />
+          <p className="mt-1.5 text-[11px] text-ink-500">of events needed the agent</p>
+        </div>
+        <div className="rounded-lg bg-ink-50 p-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+            Actions / wake
+          </p>
+          <p className="tnum mt-0.5 text-2xl font-semibold leading-none text-ink-900">
+            {analytics.actions_per_wake}
+          </p>
+          <Meter value={Math.min(100, analytics.actions_per_wake * 33)} tone="bg-violet-500" />
+          <p className="mt-1.5 text-[11px] text-ink-500">work done per consultation</p>
+        </div>
+      </div>
+      <dl className="mt-3 divide-y divide-ink-100 border-t border-ink-100">
         {rows.map(([label, value]) => (
-          <div key={label} className="flex items-center justify-between gap-3 text-sm">
-            <dt className="text-slate-500">{label}</dt>
-            <dd className="font-medium tabular-nums text-slate-800">{value}</dd>
+          <div key={label} className="flex items-center justify-between gap-3 py-1.5">
+            <dt className="text-xs text-ink-500">{label}</dt>
+            <dd className="tnum text-xs font-semibold text-ink-800">{value}</dd>
           </div>
         ))}
       </dl>
-      <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
-        <div>
-          <p className="text-[11px] uppercase tracking-wide text-slate-500">Wake rate</p>
-          <p className="text-lg font-semibold tabular-nums text-slate-900">
-            {Math.round(analytics.wake_rate * 100)}%
-          </p>
-          <p className="text-[11px] text-slate-500">of events needed the agent</p>
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-wide text-slate-500">Actions / wake</p>
-          <p className="text-lg font-semibold tabular-nums text-slate-900">
-            {analytics.actions_per_wake}
-          </p>
-          <p className="text-[11px] text-slate-500">work done per consultation</p>
-        </div>
-      </div>
     </Card>
   );
 }
