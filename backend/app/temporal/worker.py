@@ -6,6 +6,7 @@ from temporalio import activity
 from temporalio.worker import Worker
 
 from app.config import get_settings
+from app.temporal.activities import ALL_ACTIVITIES
 from app.temporal.client import connect_client
 from app.temporal.workflow import OrderSupervisorWorkflow
 
@@ -22,10 +23,13 @@ async def run_worker(smoke: bool = False) -> None:
         client,
         task_queue=get_settings().temporal_task_queue,
         workflows=[OrderSupervisorWorkflow],
-        activities=[scaffold_health],
+        activities=[*ALL_ACTIVITIES, scaffold_health],
     )
     async with worker:
-        logging.info("OrderPilot worker started; OrderSupervisorWorkflow registered")
+        logging.info(
+            "OrderPilot worker started; workflow and %s activities registered",
+            len(ALL_ACTIVITIES) + 1,
+        )
         if smoke:
             await asyncio.sleep(2)
         else:

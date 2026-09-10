@@ -1,82 +1,60 @@
 # Project status
 
-## Stage 1 — complete (2026-09-10)
+## Stage 2 — complete (2026-09-10)
 
-Stage 0's exit gate was blocked by host infrastructure; it has now been cleared and re-validated end to end, and Stage 1 is implemented. No commit or push has been made by the assistant.
+Stage 1 was committed and pushed by the user as `80e0bd9`. The working tree was clean at the start of this stage; both Docker services were healthy and were re-verified before starting. Stage 2 adds the agent runtime on top of the durable workflow. No commit or push has been made by the assistant.
 
-### Stage 0 exit gate — now passing
+### Built in Stage 2
 
-C: has ~20 GB free and Docker Desktop starts normally, so the earlier disk-full and WSL storage failures no longer apply.
+- `app/agent/schema.py` — the Pydantic decision contract. Tool names are a closed enum in the schema, so an invented tool fails validation rather than reaching the allow-list. `normalize()` then resolves the sleep specification to a bounded integer and filters actions against the supervisor's allowed list, returning the rejected names so the rejection is auditable. An `ACT` whose every tool was rejected is downgraded to `NO_ACTION`.
+- `app/agent/provider.py` — one provider interface with two implementations. `ClaudeProvider` uses the Anthropic SDK's structured-output parse endpoint with `claude-opus-5` and server-side refusal fallbacks. `MockProvider` is deterministic, needs no key or network, and is the default. `deterministic_fallback()` never acts.
+- `app/agent/prompt.py` — compact per-decision context: supervisor instruction, live run instructions, structured order state, memory, triggering event, wake evaluation, a short recent-activity window, and allowed actions. Raw history is never sent.
+- `app/agent/execution.py` — the five business actions, simulated, each returning a structured success/failure result; plus deterministic memory compaction with a line cap, a dropped-note marker, and a character cap.
+- `app/temporal/activities.py` — four Activities: `make_decision`, `run_business_action`, `compact_run_memory`, `finalize_run`.
+- `app/temporal/workflow.py` — rewired to call those Activities with explicit timeouts and retry policies. The workflow still performs no I/O and its lifecycle rules are unchanged.
+- Configuration: `LLM_PROVIDER` (default `mock`), `ANTHROPIC_MODEL` (default `claude-opus-5`), `ANTHROPIC_API_KEY`, all documented in `.env.example`.
 
-One real defect was found and fixed while clearing the gate. The Temporal image layers cached during the disk-full event were corrupt: `/etc/passwd` and `/etc/group` inside the image were both 0 bytes, so Docker could not resolve the `temporal` user the image runs as and container creation failed with `unable to find user temporal`. Re-pulling the same digest did not repair it, because containerd still considered the corrupt content valid and re-downloaded 0 bytes. A clean `alpine` pull confirmed Docker's storage was otherwise healthy. The image was removed with the user's explicit approval and the pin moved to `temporalio/temporal:1.8.2`, whose layers download intact. No volumes were deleted; `postgres_data` and `temporal_data` were preserved.
-
-A second, unrelated defect surfaced immediately after: the named volume is created root-owned while the image runs as uid 1000, so the dev server could not create its SQLite file (`unable to create SQLite admin DB`). Compose now runs that dev-only container as root, which keeps a fresh clone working with no manual setup step.
-
-| Check | Result |
-| --- | --- |
-| `docker compose up -d --wait` | PASS: postgres and temporal both healthy |
-| `alembic upgrade head` against live Postgres | PASS |
-| `alembic check` | PASS: no schema drift |
-| `pytest` with `RUN_INTEGRATION=1` | PASS: no tests skipped |
-| `python -m app.checks all` | PASS: database and temporal |
-| `python -m app.temporal.worker --smoke` | PASS |
-| `npm ci` in the C: checkout | PASS: 364 packages, zero vulnerabilities |
-| `npm run lint` | PASS: zero errors; one known anonymous-default-export warning in the PostCSS config |
-| `npm run typecheck` | PASS |
-| `npm run build` | PASS |
-| HTTP GET `/` (frontend) | PASS: 200 |
-| HTTP GET `/health` (backend) | PASS: `{"status":"ok","service":"orderpilot-api"}` |
-
-The earlier D: validation copy is no longer needed; all frontend checks now pass in the repository checkout itself.
-
-### Built in Stage 1
-
-- `app/domain/` — pure, deterministic, I/O-free logic, safe inside the workflow sandbox and testable without a Temporal server:
-  - `events.py` — event types and validating parser; unknown types survive as strings rather than being rejected.
-  - `order_state.py` — explicit structured order state and a non-mutating `apply_event`.
-  - `wake_policy.py` — deterministic Level A wake rules, severity table, keyword check for customer messages, unknown-event escalation, and a configurable aggressiveness threshold.
-  - `decision.py` — the structured decision contract Stage 2's agent will return, with a deterministic placeholder implementation.
-  - `actions.py` — the exact five assignment actions.
-  - `lifecycle.py` — run statuses and explicit terminal rules.
-- `app/temporal/types.py` — `RunParams` / `RunResult` contracts and `workflow_id_for_order`, giving one workflow ID per order.
-- `app/temporal/workflow.py` — `OrderSupervisorWorkflow` with five Signals (`order_event`, `add_instruction`, `pause`, `resume`, `terminate`), two Queries (`state`, `timeline`), pending-event handling with `event_id` de-duplication, an in-workflow unified timeline, simple rolling memory, durable scheduled wake-ups, and deterministic finalization.
-- `app/temporal/worker.py` — now registers the workflow.
-
-Wake-ups happen on workflow start, on an important Signal, and on the durable review timer. Between wakes the workflow blocks on `wait_condition` with a timeout set to the earlier of the next review and the maximum run age; there is no polling loop. Terminal state is reached only through workflow-owned rules — a `delivered` / `refund_completed` / `order_cancelled` event, a `terminate` Signal, or the maximum age — never because a decision asked for it.
+The action allow-list is enforced three times: the schema constrains tool names, the Activity filters against the supervisor configuration, and execution re-checks before running anything.
 
 ### Validation performed (2026-09-10)
 
 | Check | Result |
 | --- | --- |
-| `pytest` with `RUN_INTEGRATION=1` | PASS: 29 passed, 0 skipped |
+| `pytest` with `RUN_INTEGRATION=1` | PASS: 50 passed, 0 skipped |
+| `pytest tests/test_agent.py` | PASS: 18 agent runtime tests |
+| `pytest tests/test_workflow.py` | PASS: 15 Temporal lifecycle tests |
 | `pytest tests/test_domain.py` | PASS: 12 domain tests |
-| `pytest tests/test_workflow.py` | PASS: 12 Temporal lifecycle tests |
 | `ruff check .` | PASS |
 | `ruff format --check .` | PASS |
-| `mypy` (strict) | PASS: 18 source files |
+| `mypy` (strict) | PASS: 24 source files |
 | Live end-to-end run against the Docker Temporal server | PASS: see below |
 
-Workflow tests cover workflow start, Signal reception, routine events that deliberately do not wake the agent, important events that do, duplicate and malformed events, durable timer wake, pause deferring events, resume processing them, terminate while sleeping, terminate while paused, live instructions changing the next decision, terminal completion with final output, and the maximum-age rule. They run on Temporal's time-skipping test server, so durable timers are exercised without real waiting.
+New tests cover schema validation and rejection of malformed output, rejection of invented tool names, allow-list filtering with the rejected tools reported, `ACT` downgraded when all tools are rejected, sleep clamping and timestamp conversion, execution of all five actions, refusal of disallowed and unknown tools, safe defaults for missing arguments, memory compaction and de-duplication, mock determinism, the deterministic fallback when the provider fails, and prompt composition. Two workflow tests cover the Stage 2 exit criteria directly: a stub provider that recommends completion on every decision cannot end a run (only a later `delivered` event does), and a disallowed tool is never executed end to end.
 
-The live smoke ran a real worker against the Docker Temporal dev server: start woke the agent once and scheduled a sleep; `payment_confirmed` updated state without waking it; an added instruction plus `shipment_delayed` woke it and proposed `message_logistics_team` and `create_internal_note`; pause reported `PAUSED`; and `delivered` completed the run as `COMPLETED` / `delivered` with 3 events, 3 wake-ups, 1 no-wake event, and a populated final summary.
+The live smoke ran a real worker against the Docker Temporal dev server with the mock provider: start woke the agent and slept; `payment_confirmed` updated state without waking it; an instruction plus `shipment_delayed` woke the agent, which executed `message_logistics_team` and `create_internal_note` and updated compact memory; pause reported `PAUSED`; `delivered` completed the run as `COMPLETED` / `delivered` with 3 events, 3 wake-ups, 3 executed actions, 0 failed, 0 rejected, 0 fallback decisions, and a populated final summary.
 
 ### Known limitations
 
-- Decisions come from a deterministic placeholder, not an LLM. That is intentional for this stage.
-- Proposed actions are recorded as intent only; nothing executes them yet, so there are no Activities and no action results.
-- Workflow state lives only in Temporal. Nothing is written to PostgreSQL and there is no run-management API, so the timeline and memory are reachable only through Queries.
-- Memory compaction is a simple line cap, not a real summarization Activity.
-- The Temporal dev container runs as root to work around root-owned named volumes. Acceptable for local development only.
-- Worker-restart durability is not yet demonstrated; that is Stage 5.
+- **The Claude provider path has not been executed against the live API.** No `ANTHROPIC_API_KEY` is available on this machine, so it was verified only by checking the call against the installed SDK's actual signatures (`anthropic` 1.4.0: `client.beta.messages.parse` accepts `output_format`, `betas`, and `fallbacks`) and by strict type checking. Every test and the live smoke ran on the mock provider. This needs one real call before any demo that claims live AI.
+- Nothing is persisted to PostgreSQL yet and there is no API, so state is reachable only through Temporal Queries. That is Stage 3.
+- Memory compaction is deterministic truncation, not summarization. Reasonable at this size, but it will lose detail on very long runs.
+- The wake policy is still deterministic only; the lightweight AI classifier is Stage 5, as is the human approval gate for `message_customer`.
+- Actions are simulated, as the assignment allows.
+- Worker-restart durability is still not demonstrated; that is Stage 5.
+- The Temporal dev container still runs as root to work around root-owned named volumes. Local development only.
 
 ### Files and areas changed
 
-- Added: `backend/app/domain/` (`__init__`, `actions`, `decision`, `events`, `lifecycle`, `order_state`, `wake_policy`), `backend/app/temporal/types.py`, `backend/app/temporal/workflow.py`, `backend/tests/test_domain.py`, `backend/tests/test_workflow.py`.
-- Modified: `backend/app/temporal/worker.py` (registers the workflow), `compose.yaml` (Temporal image pin and dev-only `user: root`), `README.md`, `docs/ARCHITECTURE.md`, this file.
-- Unchanged: FastAPI app, configuration, database models, migrations, and the whole frontend.
+- Added: `backend/app/agent/` (`__init__`, `schema`, `provider`, `prompt`, `execution`), `backend/app/temporal/activities.py`, `backend/tests/test_agent.py`.
+- Modified: `backend/app/temporal/workflow.py` (calls Activities; lifecycle rules unchanged), `backend/app/temporal/worker.py` (registers Activities), `backend/app/config.py` (provider settings), `backend/pyproject.toml` and `backend/uv.lock` (added `anthropic`), `backend/tests/test_workflow.py` (register Activities, wait on decision results, three new tests), `.env.example`, `README.md`, `docs/ARCHITECTURE.md`, this file.
+- Unchanged: FastAPI app, database models, migrations, `compose.yaml`, and the whole frontend.
+
+### Stage 0 and Stage 1 status
+
+Both remain green. The Stage 0 exit gate was cleared earlier today after repairing a corrupt cached Temporal image and a root-owned volume; those fixes are in `compose.yaml` and were committed in `80e0bd9`.
 
 ### Next stage
 
-Stage 2 — Agent Runtime + Actions + Memory: the Pydantic agent-decision schema, one real LLM provider abstraction plus a deterministic mock, LLM inference inside Activities, the five business actions executing behind the allow-list, compact rolling memory with a compaction Activity, safe fallback for malformed model output, and a finalization Activity. Lifecycle authority stays in the workflow.
+Stage 3 — Persistence + FastAPI + End-to-End P0 Backend: persist supervisors, runs, unified activities, order state, memory, latest decision, and final outputs; implement the supervisor/run/event/instruction/control endpoints; start workflows from the API and map events and controls onto Signals; expose timeline, memory, and final output over HTTP.
 
-**Stage 2 has NOT been started.**
+**Stage 3 has NOT been started.**

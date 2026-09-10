@@ -11,14 +11,17 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any
+from unittest.mock import patch
 
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from app.agent.schema import AgentDecisionModel, SleepSpec
 from app.domain.actions import BusinessAction
 from app.domain.events import EventType
 from app.domain.lifecycle import RunStatus, TerminalReason
+from app.temporal.activities import ALL_ACTIVITIES
 from app.temporal.types import RunParams, RunResult, workflow_id_for_order
 from app.temporal.workflow import ActivityType, OrderSupervisorWorkflow
 
@@ -39,7 +42,12 @@ async def running_workflow(
     """Start one supervisor workflow on a time-skipping test environment."""
     env = await WorkflowEnvironment.start_time_skipping()
     try:
-        async with Worker(env.client, task_queue=TASK_QUEUE, workflows=[OrderSupervisorWorkflow]):
+        async with Worker(
+            env.client,
+            task_queue=TASK_QUEUE,
+            workflows=[OrderSupervisorWorkflow],
+            activities=ALL_ACTIVITIES,
+        ):
             handle: WorkflowHandle[Any, RunResult] = await env.client.start_workflow(
                 OrderSupervisorWorkflow.run,
                 params,
@@ -83,6 +91,21 @@ async def send_event(
     )
 
 
+def decided_by(trigger: str, wakeups: int) -> Callable[[dict[str, Any]], bool]:
+    """Decisions now come from an Activity, so wait for the result, not the counter."""
+
+    def predicate(state: dict[str, Any]) -> bool:
+        decision = state.get("latest_decision")
+        return (
+            decision is not None
+            and decision["trigger"] == trigger
+            and state["stats"]["agent_wakeups"] == wakeups
+            and state["status"] != RunStatus.ACTING
+        )
+
+    return predicate
+
+
 def timeline_types(entries: list[dict[str, Any]]) -> list[str]:
     return [entry["type"] for entry in entries]
 
@@ -90,7 +113,7 @@ def timeline_types(entries: list[dict[str, Any]]) -> list[str]:
 def test_workflow_start_wakes_the_agent_and_schedules_a_durable_sleep() -> None:
     async def scenario() -> None:
         async with running_workflow(BASE_PARAMS) as (_env, handle):
-            state = await handle.query(OrderSupervisorWorkflow.state)
+            state = await wait_until(handle, decided_by("WORKFLOW_START", 1))
             assert state["status"] == RunStatus.SLEEPING
             assert state["stats"]["agent_wakeups"] == 1
             assert state["next_wake_at"] is not None
@@ -128,7 +151,7 @@ def test_important_signal_wakes_the_agent_immediately() -> None:
     async def scenario() -> None:
         async with running_workflow(BASE_PARAMS) as (_env, handle):
             await send_event(handle, EventType.SHIPMENT_DELAYED, reason="storm")
-            state = await wait_until(handle, lambda s: s["stats"]["agent_wakeups"] == 2)
+            state = await wait_until(handle, decided_by("SIGNAL", 2))
 
             assert state["latest_wake_decision"]["wake_now"] is True
             assert state["latest_decision"]["trigger"] == "SIGNAL"
@@ -183,10 +206,15 @@ def test_durable_timer_wakes_the_agent_without_any_signal() -> None:
         params = replace(BASE_PARAMS, default_wake_minutes=30)
         async with running_workflow(params) as (env, handle):
             await env.sleep(31 * 60)
-            state = await wait_until(handle, lambda s: s["stats"]["scheduled_reviews"] >= 1)
+            state = await wait_until(
+                handle,
+                lambda s: (
+                    s["stats"]["scheduled_reviews"] >= 1
+                    and s["latest_decision"]["trigger"] == "SCHEDULED_TIMER"
+                ),
+            )
 
             assert state["stats"]["agent_wakeups"] >= 2
-            assert state["latest_decision"]["trigger"] == "SCHEDULED_TIMER"
 
             await handle.signal(OrderSupervisorWorkflow.terminate, "test cleanup")
             await handle.result()
@@ -274,7 +302,7 @@ def test_live_instruction_changes_the_next_decision() -> None:
             await wait_until(handle, lambda s: len(s["run_instructions"]) == 1)
 
             await send_event(handle, EventType.SHIPMENT_DELAYED)
-            state = await wait_until(handle, lambda s: s["stats"]["agent_wakeups"] == 2)
+            state = await wait_until(handle, decided_by("SIGNAL", 2))
 
             notes = [
                 action
@@ -297,5 +325,85 @@ def test_run_ends_when_it_reaches_its_maximum_age() -> None:
             assert result.status == RunStatus.COMPLETED
             assert result.terminal_reason == TerminalReason.MAX_AGE_REACHED
             assert result.stats["scheduled_reviews"] >= 1
+
+    asyncio.run(scenario())
+
+
+class _AlwaysCompleteProvider:
+    """Recommends completion on every decision, to prove it cannot end a run."""
+
+    name = "stub"
+
+    async def decide(self, context: object) -> AgentDecisionModel:
+        return AgentDecisionModel(
+            decision="NO_ACTION",
+            priority="HIGH",
+            reason_summary="I believe this run should be closed now.",
+            actions=[],
+            memory_update="Recommended completion.",
+            sleep=SleepSpec(mode="duration", minutes=30),
+            completion_recommended=True,
+        )
+
+
+def test_agent_cannot_complete_the_run_by_recommending_it() -> None:
+    async def scenario() -> None:
+        with patch(
+            "app.temporal.activities.build_provider",
+            lambda **_kwargs: _AlwaysCompleteProvider(),
+        ):
+            async with running_workflow(BASE_PARAMS) as (_env, handle):
+                await send_event(handle, EventType.PAYMENT_FAILED, reason="card declined")
+                state = await wait_until(handle, decided_by("SIGNAL", 2))
+
+                # The agent asked to finish; only the workflow may decide that.
+                assert state["latest_decision"]["completion_recommended"] is True
+                assert state["terminal"] is False
+                assert state["status"] == RunStatus.SLEEPING
+                assert state["next_wake_at"] is not None
+
+                # A real terminal event still ends it, through the workflow rule.
+                await send_event(handle, EventType.DELIVERED)
+                result = await handle.result()
+                assert result.status == RunStatus.COMPLETED
+                assert result.terminal_reason == TerminalReason.DELIVERED
+
+    asyncio.run(scenario())
+
+
+def test_disallowed_action_is_never_executed() -> None:
+    async def scenario() -> None:
+        params = replace(BASE_PARAMS, allowed_actions=[str(BusinessAction.CREATE_INTERNAL_NOTE)])
+        async with running_workflow(params) as (_env, handle):
+            await send_event(handle, EventType.SHIPMENT_DELAYED, reason="storm")
+            state = await wait_until(handle, decided_by("SIGNAL", 2))
+
+            executed = [action["tool"] for action in state["executed_actions"]]
+            assert BusinessAction.MESSAGE_LOGISTICS_TEAM not in executed
+            assert state["stats"]["actions_failed"] == 0
+
+            await handle.signal(OrderSupervisorWorkflow.terminate, "test cleanup")
+            await handle.result()
+
+    asyncio.run(scenario())
+
+
+def test_actions_execute_and_memory_is_compacted_across_wakes() -> None:
+    async def scenario() -> None:
+        async with running_workflow(BASE_PARAMS) as (_env, handle):
+            await send_event(handle, EventType.SHIPMENT_DELAYED, reason="storm")
+            state = await wait_until(handle, decided_by("SIGNAL", 2))
+
+            executed = [action["tool"] for action in state["executed_actions"]]
+            assert BusinessAction.MESSAGE_LOGISTICS_TEAM in executed
+            assert state["stats"]["actions_executed"] >= 1
+            assert state["memory_summary"]
+
+            entries = timeline_types(await handle.query(OrderSupervisorWorkflow.timeline, 100))
+            assert ActivityType.ACTION_EXECUTED in entries
+            assert ActivityType.MEMORY_UPDATED in entries
+
+            await handle.signal(OrderSupervisorWorkflow.terminate, "test cleanup")
+            await handle.result()
 
     asyncio.run(scenario())

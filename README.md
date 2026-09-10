@@ -2,7 +2,9 @@
 
 Durable AI order supervisor for the original Order Supervisor PDF assignment. The PDF is the requirements source; the existing staged prompt is preserved but is not an additional requirements source.
 
-Implemented through Stage 1: Next.js/Tailwind landing page, FastAPI liveness, PostgreSQL schema/migration, local Temporal configuration, and `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules. Decisions are still a deterministic placeholder: no LLM, no executed actions, and no run-management API yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
+Implemented through Stage 2: Next.js/Tailwind landing page, FastAPI liveness, PostgreSQL schema/migration, local Temporal configuration, `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules — plus the agent runtime: a Pydantic-validated decision contract, a Claude provider and a deterministic mock, the five business actions executing behind an allow-list, compact rolling memory, and a finalization Activity. There is no run-management API or UI yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
+**No API key is required.** The default `LLM_PROVIDER=mock` runs a deterministic agent, so the whole system can be demonstrated offline.
 
 ## Local setup (PowerShell)
 
@@ -36,7 +38,7 @@ Set-Location backend
 uv run --locked python -m app.temporal.worker
 ```
 
-The worker registers `OrderSupervisorWorkflow` plus the `scaffold_health` infrastructure probe. It starts no runs on its own; Stage 3 adds the API that creates them. `--smoke` starts the actual worker briefly and shuts it down cleanly.
+The worker registers `OrderSupervisorWorkflow`, the four Activities, and the `scaffold_health` infrastructure probe. It starts no runs on its own; Stage 3 adds the API that creates them. `--smoke` starts the actual worker briefly and shuts it down cleanly.
 
 | Service | Local address |
 | --- | --- |
@@ -122,4 +124,22 @@ The agent is woken on workflow start, on an important Signal, and on the durable
 
 Terminal conditions are owned by the workflow, never by a decision: a `delivered`, `refund_completed`, or `order_cancelled` event; a `terminate` Signal; or the configured maximum run age.
 
-See [architecture](docs/ARCHITECTURE.md). Stage 2 adds the agent runtime, the five business actions, and memory.
+## Agent runtime (Stage 2)
+
+Decisions are made in an Activity, never in workflow code, and every decision is validated with Pydantic before it can affect anything.
+
+| Setting | Meaning |
+| --- | --- |
+| `LLM_PROVIDER=mock` | Default. Deterministic decisions, no API key, no network. |
+| `LLM_PROVIDER=claude` | Real provider via the Anthropic SDK. Needs `ANTHROPIC_API_KEY`. |
+| `ANTHROPIC_MODEL` | Defaults to `claude-opus-5`. |
+
+The agent returns a fixed structure: decision, priority, one-or-two-sentence reason summary, actions, memory update, sleep interval, and a completion recommendation. Anything outside that schema is rejected. Tool names are constrained by the schema itself, then filtered again against the supervisor's allowed actions, and re-checked once more at execution time.
+
+If the provider fails or returns something unvalidatable, the Activity retries once and then uses a deterministic fallback that takes no action and schedules an ordinary review, so a provider outage degrades to a quiet supervisor rather than a wrong one. Fallback use is counted and surfaced in the final recommendations.
+
+The five actions — `message_fulfillment_team`, `message_payments_team`, `message_logistics_team`, `message_customer`, `create_internal_note` — are simulated, and each execution returns a structured success/failure result recorded on the timeline.
+
+The agent can recommend completion, but it cannot cause it. Terminal state remains owned by the workflow rules above.
+
+See [architecture](docs/ARCHITECTURE.md). Stage 3 adds persistence and the FastAPI control plane.

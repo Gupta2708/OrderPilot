@@ -1,18 +1,19 @@
 """OrderSupervisorWorkflow: Temporal owns the order lifecycle.
 
-Stage 1 keeps every decision deterministic and in-workflow. There are no
-Activities yet, so nothing here performs I/O and the workflow is fully
-replay-safe. Stage 2 moves decision making into an Agent Activity without
-changing the lifecycle rules that live here.
+The workflow itself performs no I/O. Agent inference, business actions, memory
+compaction, and final-summary generation all run as Activities, so this code
+stays deterministic and replay-safe. Lifecycle authority lives here and nowhere
+else: the agent may recommend completion, but only the rules in this file end a
+run.
 """
 
 from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from app.domain.decision import DecisionKind, SupervisorDecision, Trigger, decide
     from app.domain.events import OrderEvent, parse_event
     from app.domain.lifecycle import (
         RunStatus,
@@ -22,10 +23,30 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.domain.order_state import apply_event, initial_order_state
     from app.domain.wake_policy import WakeAggressiveness, WakeEvaluation, evaluate_wake
+    from app.temporal.activities import (
+        ActionRequest,
+        DecisionRequest,
+        DecisionResponse,
+        FinalizeRequest,
+        FinalizeResponse,
+        MemoryRequest,
+        compact_run_memory,
+        finalize_run,
+        make_decision,
+        run_business_action,
+    )
     from app.temporal.types import RunParams, RunResult
 
 MAX_TIMELINE_ENTRIES = 500
-MAX_MEMORY_LINES = 12
+RECENT_ACTIVITY_WINDOW = 8
+
+DECISION_RETRY = RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1))
+ACTION_RETRY = RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1))
+
+DECISION_TIMEOUT = timedelta(minutes=2)
+ACTION_TIMEOUT = timedelta(seconds=30)
+MEMORY_TIMEOUT = timedelta(seconds=30)
+FINALIZE_TIMEOUT = timedelta(minutes=1)
 
 
 class ActivityType:
@@ -37,7 +58,9 @@ class ActivityType:
     EVENT_DUPLICATE_IGNORED = "EVENT_DUPLICATE_IGNORED"
     WAKE_DECISION = "WAKE_DECISION"
     AGENT_DECISION = "AGENT_DECISION"
-    ACTION_PROPOSED = "ACTION_PROPOSED"
+    ACTION_EXECUTED = "ACTION_EXECUTED"
+    ACTION_FAILED = "ACTION_FAILED"
+    ACTION_REJECTED = "ACTION_REJECTED"
     MEMORY_UPDATED = "MEMORY_UPDATED"
     SLEEP_SCHEDULED = "SLEEP_SCHEDULED"
     INSTRUCTION_ADDED = "INSTRUCTION_ADDED"
@@ -59,7 +82,8 @@ class OrderSupervisorWorkflow:
         self._seen_event_ids: set[str] = set()
         self._instructions: list[str] = []
         self._timeline: list[dict[str, Any]] = []
-        self._memory_lines: list[str] = []
+        self._memory_summary: str = ""
+        self._executed_actions: list[dict[str, Any]] = []
         self._latest_decision: dict[str, Any] | None = None
         self._latest_wake: dict[str, Any] | None = None
         self._next_wake_at: datetime | None = None
@@ -73,9 +97,12 @@ class OrderSupervisorWorkflow:
             "events_received": 0,
             "agent_wakeups": 0,
             "no_wake_events": 0,
-            "actions_proposed": 0,
+            "actions_executed": 0,
+            "actions_failed": 0,
+            "actions_rejected": 0,
             "scheduled_reviews": 0,
             "instructions_added": 0,
+            "fallback_decisions": 0,
         }
 
     # ------------------------------------------------------------------ run
@@ -96,7 +123,7 @@ class OrderSupervisorWorkflow:
         )
 
         # Wake 1 of 3: workflow start.
-        self._wake(Trigger.WORKFLOW_START, None, None)
+        await self._wake("WORKFLOW_START", None, None)
 
         while self._terminal_reason is None:
             if self._terminate_requested:
@@ -119,7 +146,7 @@ class OrderSupervisorWorkflow:
                         break
                     # Wake 3 of 3: scheduled review.
                     self._stats["scheduled_reviews"] += 1
-                    self._wake(Trigger.SCHEDULED_TIMER, None, None)
+                    await self._wake("SCHEDULED_TIMER", None, None)
                     continue
             elif self._max_age_reached():
                 self._terminal_reason = TerminalReason.MAX_AGE_REACHED
@@ -131,9 +158,9 @@ class OrderSupervisorWorkflow:
             if self._paused:
                 continue
 
-            self._drain_pending_events()
+            await self._drain_pending_events()
 
-        return self._finalize()
+        return await self._finalize()
 
     # -------------------------------------------------------------- signals
 
@@ -195,10 +222,11 @@ class OrderSupervisorWorkflow:
             "terminal": self._terminal_reason is not None,
             "terminal_reason": str(self._terminal_reason) if self._terminal_reason else None,
             "order_state": self._order_state,
-            "memory_summary": self._memory_summary(),
+            "memory_summary": self._memory_summary,
             "run_instructions": list(self._instructions),
             "latest_decision": self._latest_decision,
             "latest_wake_decision": self._latest_wake,
+            "executed_actions": list(self._executed_actions),
             "next_wake_at": self._iso(self._next_wake_at),
             "last_wake_at": self._iso(self._last_wake_at),
             "pending_events": len(self._pending_events),
@@ -229,7 +257,7 @@ class OrderSupervisorWorkflow:
         target = min(self._next_wake_at or age_limit, age_limit)
         return max((target - now).total_seconds(), 0.0)
 
-    def _drain_pending_events(self) -> None:
+    async def _drain_pending_events(self) -> None:
         while self._pending_events and not self._terminate_requested and not self._paused:
             event = self._pending_events.pop(0)
             self._stats["events_received"] += 1
@@ -247,7 +275,7 @@ class OrderSupervisorWorkflow:
 
             if evaluation.wake_now:
                 # Wake 2 of 3: important Signal.
-                self._wake(Trigger.SIGNAL, event, evaluation)
+                await self._wake("SIGNAL", event, evaluation)
             else:
                 self._stats["no_wake_events"] += 1
 
@@ -257,9 +285,9 @@ class OrderSupervisorWorkflow:
                 self._terminal_reason = reason
                 return
 
-    def _wake(
+    async def _wake(
         self,
-        trigger: Trigger,
+        trigger: str,
         event: OrderEvent | None,
         evaluation: WakeEvaluation | None,
     ) -> None:
@@ -268,36 +296,85 @@ class OrderSupervisorWorkflow:
         self._last_wake_at = workflow.now()
         self._stats["agent_wakeups"] += 1
 
-        decision = decide(
+        request = DecisionRequest(
+            order_id=self._params.order_id,
             trigger=trigger,
-            event=event,
-            wake_evaluation=evaluation,
+            base_instruction=self._params.base_instruction,
+            run_instructions=list(self._instructions),
             order_state=self._order_state,
-            instructions=tuple(self._instructions),
-            allowed_actions=frozenset(self._params.allowed_actions),
+            memory_summary=self._memory_summary,
+            triggering_event=(
+                {"event_id": event.event_id, "type": event.type, "payload": event.payload}
+                if event is not None
+                else None
+            ),
+            wake_evaluation=evaluation.as_dict() if evaluation is not None else None,
+            recent_activity=self._recent_activity(),
+            allowed_actions=list(self._params.allowed_actions),
             default_wake_minutes=self._params.default_wake_minutes,
         )
-        self._latest_decision = dict(decision.as_dict())
-        self._latest_decision["trigger"] = str(trigger)
+        decision: DecisionResponse = await workflow.execute_activity(
+            make_decision,
+            request,
+            start_to_close_timeout=DECISION_TIMEOUT,
+            retry_policy=DECISION_RETRY,
+        )
+
+        if decision.fallback_used:
+            self._stats["fallback_decisions"] += 1
+        self._latest_decision = {
+            "decision": decision.decision,
+            "priority": decision.priority,
+            "reason_summary": decision.reason_summary,
+            "actions": decision.actions,
+            "memory_update": decision.memory_update,
+            "sleep_minutes": decision.sleep_minutes,
+            "completion_recommended": decision.completion_recommended,
+            "provider": decision.provider,
+            "trigger": trigger,
+        }
         self._record(ActivityType.AGENT_DECISION, self._latest_decision)
-        self._apply_decision(decision)
 
-    def _apply_decision(self, decision: SupervisorDecision) -> None:
-        # Stage 1 records intent only; Stage 2 executes these via Activities.
-        for action in decision.actions:
-            self._stats["actions_proposed"] += 1
-            self._record(ActivityType.ACTION_PROPOSED, action.as_dict())
+        for tool in decision.rejected_actions:
+            self._stats["actions_rejected"] += 1
+            self._record(ActivityType.ACTION_REJECTED, {"tool": tool, "reason": "not_allowed"})
 
-        if decision.memory_update:
-            self._memory_lines.append(decision.memory_update)
-            if len(self._memory_lines) > MAX_MEMORY_LINES:
-                # Simple deterministic compaction; Stage 2 adds a real Activity.
-                self._memory_lines = self._memory_lines[-MAX_MEMORY_LINES:]
-            self._record(ActivityType.MEMORY_UPDATED, {"memory_update": decision.memory_update})
-
-        if decision.decision is DecisionKind.NO_ACTION:
-            self._status = RunStatus.SLEEPING
+        await self._execute_actions(decision.actions)
+        await self._update_memory(decision.memory_update)
         self._schedule_sleep(decision.sleep_minutes)
+
+    async def _execute_actions(self, actions: list[dict[str, Any]]) -> None:
+        assert self._params is not None
+        for action in actions:
+            result: dict[str, Any] = await workflow.execute_activity(
+                run_business_action,
+                ActionRequest(
+                    order_id=self._params.order_id,
+                    tool=str(action.get("tool", "")),
+                    arguments=dict(action.get("arguments", {})),
+                    allowed_actions=list(self._params.allowed_actions),
+                ),
+                start_to_close_timeout=ACTION_TIMEOUT,
+                retry_policy=ACTION_RETRY,
+            )
+            if result.get("ok"):
+                self._stats["actions_executed"] += 1
+                self._executed_actions.append(result)
+                self._record(ActivityType.ACTION_EXECUTED, result)
+            else:
+                self._stats["actions_failed"] += 1
+                self._record(ActivityType.ACTION_FAILED, result)
+
+    async def _update_memory(self, memory_update: str) -> None:
+        if not memory_update:
+            return
+        self._memory_summary = await workflow.execute_activity(
+            compact_run_memory,
+            MemoryRequest(existing=self._memory_summary, updates=[memory_update]),
+            start_to_close_timeout=MEMORY_TIMEOUT,
+            retry_policy=ACTION_RETRY,
+        )
+        self._record(ActivityType.MEMORY_UPDATED, {"memory_update": memory_update})
 
     def _schedule_sleep(self, minutes: int) -> None:
         safe_minutes = max(1, minutes)
@@ -308,27 +385,34 @@ class OrderSupervisorWorkflow:
             {"minutes": safe_minutes, "next_wake_at": self._iso(self._next_wake_at)},
         )
 
-    def _finalize(self) -> RunResult:
+    async def _finalize(self) -> RunResult:
         assert self._params is not None and self._started_at is not None
         reason = self._terminal_reason or TerminalReason.MANUAL_TERMINATE
         self._status = status_for_terminal_reason(reason)
         self._next_wake_at = None  # A terminal run never schedules another wake.
 
-        important = [
-            entry["payload"]
-            for entry in self._timeline
-            if entry["type"] == ActivityType.ACTION_PROPOSED
-        ]
         duration_seconds = int((workflow.now() - self._started_at).total_seconds())
         stats = dict(self._stats)
         stats["duration_seconds"] = duration_seconds
 
-        summary = (
-            f"Order {self._params.order_id} finished as {self._status} ({reason}). "
-            f"Handled {self._stats['events_received']} events with "
-            f"{self._stats['agent_wakeups']} agent wake-ups and "
-            f"{self._stats['actions_proposed']} proposed actions."
+        final: FinalizeResponse = await workflow.execute_activity(
+            finalize_run,
+            FinalizeRequest(
+                order_id=self._params.order_id,
+                status=str(self._status),
+                terminal_reason=str(reason),
+                order_state=self._order_state,
+                memory_summary=self._memory_summary,
+                executed_actions=list(self._executed_actions),
+                stats=stats,
+            ),
+            start_to_close_timeout=FINALIZE_TIMEOUT,
+            retry_policy=ACTION_RETRY,
         )
+
+        recommendations = list(final.recommendations)
+        if reason is TerminalReason.MANUAL_TERMINATE:
+            recommendations.insert(0, f"Run was terminated manually: {self._terminate_reason}.")
 
         self._record(
             ActivityType.RUN_COMPLETED
@@ -341,40 +425,33 @@ class OrderSupervisorWorkflow:
             order_id=self._params.order_id,
             status=str(self._status),
             terminal_reason=str(reason),
-            final_summary=summary,
-            important_actions=important,
-            learnings=self._learnings(),
-            recommendations=self._recommendations(),
+            final_summary=final.final_summary,
+            important_actions=list(final.important_actions),
+            learnings=list(final.learnings),
+            recommendations=recommendations,
             stats=stats,
             order_state=self._order_state,
-            memory_summary=self._memory_summary(),
+            memory_summary=self._memory_summary,
         )
-        self._record(ActivityType.FINAL_OUTPUT, {"final_summary": summary, "stats": stats})
+        self._record(
+            ActivityType.FINAL_OUTPUT, {"final_summary": final.final_summary, "stats": stats}
+        )
         return result
 
-    def _learnings(self) -> list[str]:
-        learnings: list[str] = []
-        if self._order_state.get("payment", {}).get("status") == "failed":
-            learnings.append("Payment failed at least once and needed payments-team attention.")
-        if self._order_state.get("shipment", {}).get("status") == "delayed":
-            learnings.append("Shipment was delayed; delivery risk appeared mid-run.")
-        if self._stats["no_wake_events"]:
-            count = self._stats["no_wake_events"]
-            learnings.append(
-                f"{count} routine event{'s' if count != 1 else ''} "
-                f"{'were' if count != 1 else 'was'} absorbed without waking the main agent."
+    def _recent_activity(self) -> list[dict[str, Any]]:
+        """A small, readable window of history for the prompt."""
+        summaries: list[dict[str, Any]] = []
+        for entry in self._timeline[-RECENT_ACTIVITY_WINDOW:]:
+            payload = entry.get("payload", {})
+            summary = (
+                payload.get("type")
+                or payload.get("reason_summary")
+                or payload.get("detail")
+                or payload.get("instruction")
+                or ""
             )
-        return learnings or ["Order progressed without notable incidents."]
-
-    def _recommendations(self) -> list[str]:
-        if self._terminal_reason is TerminalReason.MAX_AGE_REACHED:
-            return ["Run hit its maximum age; review whether the age limit fits this order type."]
-        if self._terminal_reason is TerminalReason.MANUAL_TERMINATE:
-            return [f"Run was terminated manually: {self._terminate_reason}."]
-        return ["No process changes recommended for this run."]
-
-    def _memory_summary(self) -> str:
-        return "\n".join(self._memory_lines)
+            summaries.append({"type": entry["type"], "summary": str(summary)[:200]})
+        return summaries
 
     def _aggressiveness(self) -> WakeAggressiveness:
         assert self._params is not None
