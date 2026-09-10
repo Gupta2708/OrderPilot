@@ -1,8 +1,8 @@
 # OrderPilot — Order Supervisor
 
-Stage 0 foundation for the original Order Supervisor PDF assignment. The PDF is the requirements source; the existing staged prompt is preserved but is not an additional requirements source.
+Durable AI order supervisor for the original Order Supervisor PDF assignment. The PDF is the requirements source; the existing staged prompt is preserved but is not an additional requirements source.
 
-Implemented: Next.js/Tailwind landing page, FastAPI liveness, PostgreSQL schema/migration, local Temporal configuration, and an activity-only worker scaffold. Order workflows, AI, actions, and product controls are not implemented. **Live infrastructure and frontend validation remain blocked by host disk exhaustion; see [PROJECT_STATUS.md](PROJECT_STATUS.md).**
+Implemented through Stage 1: Next.js/Tailwind landing page, FastAPI liveness, PostgreSQL schema/migration, local Temporal configuration, and `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules. Decisions are still a deterministic placeholder: no LLM, no executed actions, and no run-management API yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 ## Local setup (PowerShell)
 
@@ -36,7 +36,7 @@ Set-Location backend
 uv run --locked python -m app.temporal.worker
 ```
 
-The worker polls for `scaffold_health` only. It registers no order workflow and starts no runs. `--smoke` starts the actual worker briefly and shuts it down cleanly.
+The worker registers `OrderSupervisorWorkflow` plus the `scaffold_health` infrastructure probe. It starts no runs on its own; Stage 3 adds the API that creates them. `--smoke` starts the actual worker briefly and shuts it down cleanly.
 
 | Service | Local address |
 | --- | --- |
@@ -57,7 +57,7 @@ PostgreSQL holds `supervisors`, `runs`, and `activities`. Alembic manages the sc
 
 Temporal uses the supported development server with SQLite on a separate named volume. Its history is separate from the product database. This is a local POC configuration.
 
-Stop infrastructure without removing data using `docker compose stop`. If startup fails, check Docker Desktop, free disk space, and availability of ports 5432, 7233, and 8233. Inspect `docker compose ps` and `docker compose logs`. Backend and frontend can start independently of infrastructure. After disk exhaustion, restart Docker Desktop before retrying; do not reset or delete existing Docker data indiscriminately.
+Stop infrastructure without removing data using `docker compose stop`. If startup fails, check Docker Desktop, free disk space, and availability of ports 5432, 7233, and 8233. Inspect `docker compose ps` and `docker compose logs`. Backend and frontend can start independently of infrastructure. If Docker reports a missing user or unreadable image layers after a disk-full event, the cached image is corrupt: remove that image and pull it again. Do not reset Docker data or delete volumes indiscriminately.
 
 ## Validation
 
@@ -98,6 +98,28 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 (Invoke-WebRequest http://127.0.0.1:3000 -UseBasicParsing).StatusCode
 ```
 
-The interrupted frontend dependency tree was removed after disk exhaustion; `npm ci` is required before running the frontend. The lockfile preserves the successfully resolved versions. ESLint 9 is retained because the attempted version 10 update produced transitive peer warnings and was interrupted; its support warning is a known tooling limitation.
+`npm ci` is required before running the frontend. The lockfile preserves the successfully resolved versions. ESLint 9 is retained because the attempted version 10 update produced transitive peer warnings and was interrupted; its support warning is a known tooling limitation.
 
-See [architecture](docs/ARCHITECTURE.md). Stage 1 will add the durable order workflow only after explicit `CONTINUE`, once Stage 0 validation is resolved.
+Workflow lifecycle tests run against Temporal's time-skipping test server, which downloads a test-server binary on first use and needs network access once.
+
+## Workflow behaviour (Stage 1)
+
+One workflow per order, with the ID `order-supervisor:<order_id>`, so Temporal's ID uniqueness guarantees a single supervisor per order.
+
+| Signal | Effect |
+| --- | --- |
+| `order_event` | Validated, de-duplicated by `event_id`, queued for processing |
+| `add_instruction` | Appends live run guidance used by every later decision |
+| `pause` / `resume` | Suspends and restores normal event processing |
+| `terminate` | Ends the run, including while sleeping or paused |
+
+| Query | Returns |
+| --- | --- |
+| `state` | Status, order state, memory, instructions, latest decision, next wake, counters |
+| `timeline` | The recent unified activity entries |
+
+The agent is woken on workflow start, on an important Signal, and on the durable review timer. Routine events such as `payment_confirmed` update state without waking it. Between wakes the workflow waits on a durable Temporal timer rather than polling.
+
+Terminal conditions are owned by the workflow, never by a decision: a `delivered`, `refund_completed`, or `order_cancelled` event; a `terminate` Signal; or the configured maximum run age.
+
+See [architecture](docs/ARCHITECTURE.md). Stage 2 adds the agent runtime, the five business actions, and memory.

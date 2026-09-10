@@ -7,6 +7,7 @@ from temporalio.worker import Worker
 
 from app.config import get_settings
 from app.temporal.client import connect_client
+from app.temporal.workflow import OrderSupervisorWorkflow
 
 
 @activity.defn
@@ -18,10 +19,13 @@ async def scaffold_health() -> str:
 async def run_worker(smoke: bool = False) -> None:
     client = await connect_client()
     worker = Worker(
-        client, task_queue=get_settings().temporal_task_queue, activities=[scaffold_health]
+        client,
+        task_queue=get_settings().temporal_task_queue,
+        workflows=[OrderSupervisorWorkflow],
+        activities=[scaffold_health],
     )
     async with worker:
-        logging.info("Stage 0 activity worker started; no order workflow is registered")
+        logging.info("OrderPilot worker started; OrderSupervisorWorkflow registered")
         if smoke:
             await asyncio.sleep(2)
         else:
@@ -29,7 +33,7 @@ async def run_worker(smoke: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OrderPilot Stage 0 activity worker")
+    parser = argparse.ArgumentParser(description="OrderPilot Temporal worker")
     parser.add_argument("--smoke", action="store_true", help="Start the worker, then shut down")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)

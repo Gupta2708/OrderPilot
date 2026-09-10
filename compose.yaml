@@ -1,7 +1,7 @@
 name: orderpilot
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orderpilot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orderpilot_dev}
@@ -16,7 +16,10 @@ services:
       timeout: 3s
       retries: 20
   temporal:
-    image: temporalio/temporal@sha256:cea463d98a8d6def4420f903ea5c3fcd0d85c8d10fbcc2770a50c12fff2eb26d
+    image: temporalio/temporal:1.8.2@sha256:cf86707827fac99e4d1c4a47dc11b105382d796199c7bd41fb3213fb0471628e
+    # Local dev only: the named volume is created root-owned, while the image's
+    # default "temporal" user (uid 1000) cannot write the dev-server SQLite file.
+    user: root
     command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
     ports:
       - "127.0.0.1:7233:7233"

@@ -1,62 +1,82 @@
 # Project status
 
-## Stage 0 — implemented; exit gate blocked
+## Stage 1 — complete (2026-09-10)
 
-Original assignment PDF: all 20 pages read. The PDF is authoritative. The original staged Markdown file remains unchanged and is not being followed as an additional requirements source, per the user's correction.
+Stage 0's exit gate was blocked by host infrastructure; it has now been cleared and re-validated end to end, and Stage 1 is implemented. No commit or push has been made by the assistant.
 
-The initial workspace contained only that Markdown file, with no application code, status file, or Git repository. No Git initialization, commit, or push has been performed.
+### Stage 0 exit gate — now passing
 
-### Built
+C: has ~20 GB free and Docker Desktop starts normally, so the earlier disk-full and WSL storage failures no longer apply.
 
-- Next.js App Router/TypeScript/Tailwind landing page and lint/type/build scripts.
-- FastAPI `/health` endpoint and root environment configuration.
-- SQLAlchemy models and an Alembic migration for supervisors, runs, and unified activities.
-- Docker Compose with persistent local Postgres and Temporal development services.
-- Temporal connection helper and activity-only worker with smoke mode. No order workflow.
-- Connectivity CLI, backend tests, environment example, lockfiles, README, architecture note.
+One real defect was found and fixed while clearing the gate. The Temporal image layers cached during the disk-full event were corrupt: `/etc/passwd` and `/etc/group` inside the image were both 0 bytes, so Docker could not resolve the `temporal` user the image runs as and container creation failed with `unable to find user temporal`. Re-pulling the same digest did not repair it, because containerd still considered the corrupt content valid and re-downloaded 0 bytes. A clean `alpine` pull confirmed Docker's storage was otherwise healthy. The image was removed with the user's explicit approval and the pin moved to `temporalio/temporal:1.8.2`, whose layers download intact. No volumes were deleted; `postgres_data` and `temporal_data` were preserved.
+
+A second, unrelated defect surfaced immediately after: the named volume is created root-owned while the image runs as uid 1000, so the dev server could not create its SQLite file (`unable to create SQLite admin DB`). Compose now runs that dev-only container as root, which keeps a fresh clone working with no manual setup step.
+
+| Check | Result |
+| --- | --- |
+| `docker compose up -d --wait` | PASS: postgres and temporal both healthy |
+| `alembic upgrade head` against live Postgres | PASS |
+| `alembic check` | PASS: no schema drift |
+| `pytest` with `RUN_INTEGRATION=1` | PASS: no tests skipped |
+| `python -m app.checks all` | PASS: database and temporal |
+| `python -m app.temporal.worker --smoke` | PASS |
+| `npm ci` in the C: checkout | PASS: 364 packages, zero vulnerabilities |
+| `npm run lint` | PASS: zero errors; one known anonymous-default-export warning in the PostCSS config |
+| `npm run typecheck` | PASS |
+| `npm run build` | PASS |
+| HTTP GET `/` (frontend) | PASS: 200 |
+| HTTP GET `/health` (backend) | PASS: `{"status":"ok","service":"orderpilot-api"}` |
+
+The earlier D: validation copy is no longer needed; all frontend checks now pass in the repository checkout itself.
+
+### Built in Stage 1
+
+- `app/domain/` — pure, deterministic, I/O-free logic, safe inside the workflow sandbox and testable without a Temporal server:
+  - `events.py` — event types and validating parser; unknown types survive as strings rather than being rejected.
+  - `order_state.py` — explicit structured order state and a non-mutating `apply_event`.
+  - `wake_policy.py` — deterministic Level A wake rules, severity table, keyword check for customer messages, unknown-event escalation, and a configurable aggressiveness threshold.
+  - `decision.py` — the structured decision contract Stage 2's agent will return, with a deterministic placeholder implementation.
+  - `actions.py` — the exact five assignment actions.
+  - `lifecycle.py` — run statuses and explicit terminal rules.
+- `app/temporal/types.py` — `RunParams` / `RunResult` contracts and `workflow_id_for_order`, giving one workflow ID per order.
+- `app/temporal/workflow.py` — `OrderSupervisorWorkflow` with five Signals (`order_event`, `add_instruction`, `pause`, `resume`, `terminate`), two Queries (`state`, `timeline`), pending-event handling with `event_id` de-duplication, an in-workflow unified timeline, simple rolling memory, durable scheduled wake-ups, and deterministic finalization.
+- `app/temporal/worker.py` — now registers the workflow.
+
+Wake-ups happen on workflow start, on an important Signal, and on the durable review timer. Between wakes the workflow blocks on `wait_condition` with a timeout set to the earlier of the next review and the maximum run age; there is no polling loop. Terminal state is reached only through workflow-owned rules — a `delivered` / `refund_completed` / `order_cancelled` event, a `terminate` Signal, or the maximum age — never because a decision asked for it.
 
 ### Validation performed (2026-09-10)
 
 | Check | Result |
 | --- | --- |
-| Backend `uv run --locked pytest` | PASS: 4 passed; 1 integration test intentionally skipped without a live migrated DB |
-| Backend `uv run --locked ruff check .` | PASS |
-| Backend `uv run --locked ruff format --check .` | PASS |
-| Backend `uv run --locked mypy` | PASS: 9 application files |
-| Uvicorn startup and HTTP GET `/health` | PASS: HTTP response contained status=ok, service=orderpilot-api |
-| Alembic `upgrade head --sql` | PASS: PostgreSQL SQL generated and inspected |
-| `docker compose config --quiet` | PASS, including final Temporal image digest pin |
-| `docker compose up -d --wait` | FAIL: Docker filesystem I/O error during container creation; retry also failed reading image storage |
-| Alembic `upgrade head` against local DB | FAIL: connection refused; Postgres could not start |
-| `python -m app.checks all` | FAIL: both database and Temporal unavailable |
-| `python -m app.temporal.worker --smoke` | FAIL: Temporal connection refused; SDK imports succeeded |
-| Initial frontend dependency install | PASS: 364 packages installed; audit reported zero vulnerabilities |
-| Subsequent ESLint update | FAIL: disk full; version 10 not retained in manifest/lock |
-| Frontend `npm run lint` | FAIL: incomplete dependency update left eslint unavailable |
-| Frontend `npm run typecheck` | PASS before final explicit Turbopack-root config addition |
-| Frontend `npm run build` | FAIL: compilation succeeded, then disk write error and process spawn EPERM |
-| Browser/frontend HTTP smoke | BLOCKED: frontend dependencies need reinstall after disk recovery |
-| Live schema drift/round-trip tests | BLOCKED: require migrated Postgres |
+| `pytest` with `RUN_INTEGRATION=1` | PASS: 29 passed, 0 skipped |
+| `pytest tests/test_domain.py` | PASS: 12 domain tests |
+| `pytest tests/test_workflow.py` | PASS: 12 Temporal lifecycle tests |
+| `ruff check .` | PASS |
+| `ruff format --check .` | PASS |
+| `mypy` (strict) | PASS: 18 source files |
+| Live end-to-end run against the Docker Temporal server | PASS: see below |
 
-### Host blocker and cleanup
+Workflow tests cover workflow start, Signal reception, routine events that deliberately do not wake the agent, important events that do, duplicate and malformed events, durable timer wake, pause deferring events, resume processing them, terminate while sleeping, terminate while paused, live instructions changing the next decision, terminal completion with final output, and the maximum-age rule. They run on Temporal's time-skipping test server, so durable timers are exercised without real waiting.
 
-C: reached 0 free bytes. npm reported ENOSPC; Docker reported storage I/O errors. Only this task's generated `frontend/.next` and incomplete `frontend/node_modules` were removed to recover space and finish source documentation safely. No unrelated files or Docker data were deleted. About 1.9 GB was recovered, which does not provide enough headroom to repeat the same installation/build safely without more space.
+The live smoke ran a real worker against the Docker Temporal dev server: start woke the agent once and scheduled a sleep; `payment_confirmed` updated state without waking it; an added instruction plus `shipment_delayed` woke it and proposed `message_logistics_team` and `create_internal_note`; pause reported `PAUSED`; and `delivered` completed the run as `COMPLETED` / `delivered` with 3 events, 3 wake-ups, 1 no-wake event, and a populated final summary.
 
-The README was restored after a disk-full write interruption. Final review confirmed no empty source files, valid Python syntax, and matching package/lock manifests. Whitespace issues found in four scaffold files were corrected. The Compose configuration validates, and the Temporal worker CLI imports and displays help. No Git repository exists, so review used direct source inspection and Git no-index whitespace checks. Frontend packages are pinned to the originally resolved versions. ESLint 9 has an upstream support warning; the attempted upgrade encountered transitive peer warnings before disk exhaustion. The temporary API smoke server was stopped after validation.
+### Known limitations
 
-### Remaining Stage 0 work
+- Decisions come from a deterministic placeholder, not an LLM. That is intentional for this stage.
+- Proposed actions are recorded as intent only; nothing executes them yet, so there are no Activities and no action results.
+- Workflow state lives only in Temporal. Nothing is written to PostgreSQL and there is no run-management API, so the timeline and memory are reachable only through Queries.
+- Memory compaction is a simple line cap, not a real summarization Activity.
+- The Temporal dev container runs as root to work around root-owned named volumes. Acceptable for local development only.
+- Worker-restart durability is not yet demonstrated; that is Stage 5.
 
-1. Free several additional GB on C:; restart Docker Desktop if its storage error persists.
-2. Run `npm ci` in frontend and rerun lint, typecheck, build, and HTTP/browser smoke.
-3. Run `docker compose up -d --wait`, migrate, run `alembic check`, connectivity checks, and worker smoke.
-4. Run backend tests with `RUN_INTEGRATION=1` and update this status with actual results.
+### Files and areas changed
 
-Do not treat the Stage 0 exit gate as passed. Do not proceed to Stage 1 while these checks remain unresolved.
+- Added: `backend/app/domain/` (`__init__`, `actions`, `decision`, `events`, `lifecycle`, `order_state`, `wake_policy`), `backend/app/temporal/types.py`, `backend/app/temporal/workflow.py`, `backend/tests/test_domain.py`, `backend/tests/test_workflow.py`.
+- Modified: `backend/app/temporal/worker.py` (registers the workflow), `compose.yaml` (Temporal image pin and dev-only `user: root`), `README.md`, `docs/ARCHITECTURE.md`, this file.
+- Unchanged: FastAPI app, configuration, database models, migrations, and the whole frontend.
 
 ### Next stage
 
-Stage 1 will implement the durable order workflow, order/instruction/control Signals, Queries, durable timers, pause/resume/terminate, and deterministic terminal rules. It will not add full LLM orchestration.
+Stage 2 — Agent Runtime + Actions + Memory: the Pydantic agent-decision schema, one real LLM provider abstraction plus a deterministic mock, LLM inference inside Activities, the five business actions executing behind the allow-list, compact rolling memory with a compaction Activity, safe fallback for malformed model output, and a finalization Activity. Lifecycle authority stays in the workflow.
 
-**Stage 1 has NOT been started. Explicit CONTINUE is required before starting it.**
-
-Suggested commit message after review: `chore(scaffold): add OrderPilot stage 0 foundation`
+**Stage 2 has NOT been started.**
