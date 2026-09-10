@@ -6,14 +6,14 @@
 
 **One order → one long-running Temporal workflow → an AI that is woken only when it is actually needed.**
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Temporal](https://img.shields.io/badge/Temporal-SDK%201.32-000000?logo=temporal&logoColor=white)](https://temporal.io/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/tests-96%20passing-success)](#tests-and-verification)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)](https://www.python.org/)
+[![Temporal](https://img.shields.io/badge/Temporal-SDK%201.32-0F766E)](https://temporal.io/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)](https://fastapi.tiangolo.com/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-4B5563)](https://nextjs.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1)](https://www.postgresql.org/)
+[![Tests](https://img.shields.io/badge/tests-96%20passing-16A34A)](#tests-and-verification)
 [![Typing](https://img.shields.io/badge/mypy-strict-2A6DB2)](#tests-and-verification)
-[![No API key](https://img.shields.io/badge/runs%20without-an%20API%20key-blueviolet)](#ai-provider)
+[![No API key](https://img.shields.io/badge/runs%20without-an%20API%20key-7C3AED)](#ai-provider)
 
 </div>
 
@@ -29,28 +29,28 @@ A long-running AI supervisor for e-commerce orders. Each order gets **one durabl
 <tr>
 <td width="25%" valign="top">
 
-**⏱️ Durable**
+**Durable**
 
 Survives worker restarts. Sleeps for days on a Temporal timer. Zero polling loops.
 
 </td>
 <td width="25%" valign="top">
 
-**💡 Frugal**
+**Frugal**
 
 Routine events never reach the model. The wake rate is measured and shown.
 
 </td>
 <td width="25%" valign="top">
 
-**🔒 Governed**
+**Governed**
 
 Allow-list enforced three times. Sensitive actions held for a human.
 
 </td>
 <td width="25%" valign="top">
 
-**🔍 Auditable**
+**Auditable**
 
 Append-only timeline explains every wake, decision, and action.
 
@@ -79,24 +79,24 @@ Append-only timeline explains every wake, decision, and action.
 
 ```mermaid
 flowchart TB
-    subgraph client["🖥️  Browser"]
-        UI["<b>Next.js</b> App Router + Tailwind<br/>dashboard · control room · event simulator"]
+    subgraph client["Browser"]
+        UI["Next.js App Router + Tailwind<br/>dashboard · control room · event simulator"]
     end
 
-    subgraph control["🎛️  Control plane"]
-        API["<b>FastAPI</b><br/>supervisors · runs · events · controls · approvals"]
+    subgraph control["Control plane"]
+        API["FastAPI<br/>supervisors · runs · events · controls · approvals"]
     end
 
-    subgraph durable["⚙️  Durable execution"]
-        TS["<b>Temporal service</b>"]
-        WF["<b>OrderSupervisorWorkflow</b><br/>deterministic · replay-safe · no I/O"]
-        ACT["<b>Activities</b><br/>every side effect lives here"]
+    subgraph durable["Durable execution"]
+        TS["Temporal service"]
+        WF["OrderSupervisorWorkflow<br/>deterministic · replay-safe · no I/O"]
+        ACT["Activities<br/>every side effect lives here"]
     end
 
-    DB[("<b>PostgreSQL</b><br/>supervisors · runs<br/>activity timeline · memory")]
-    LLM["<b>LLM provider</b><br/>mock · OpenRouter · Anthropic"]
+    DB[("PostgreSQL<br/>supervisors · runs<br/>activity timeline · memory")]
+    LLM["LLM provider<br/>mock · OpenRouter · Anthropic"]
 
-    UI -->|HTTP| API
+    UI -->|"HTTP"| API
     API -->|"reads: runs, timeline, memory, analytics"| DB
     API -->|"start workflow · Signals · Queries"| TS
     TS <-->|"task queue"| WF
@@ -104,10 +104,25 @@ flowchart TB
     ACT -->|"inference"| LLM
     ACT -->|"persist snapshot + timeline"| DB
 
-    style WF fill:#ccfbf1,stroke:#0f766e,stroke-width:2px
-    style ACT fill:#e0f2fe,stroke:#0369a1,stroke-width:2px
-    style DB fill:#f1f5f9,stroke:#64748b
-    style LLM fill:#ede9fe,stroke:#6d28d9
+    classDef front fill:#dbeafe,stroke:#1d4ed8,color:#17307a,stroke-width:1.5px
+    classDef api fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
+    classDef temporal fill:#cffafe,stroke:#0e7490,color:#0b4a5a,stroke-width:1.5px
+    classDef workflow fill:#ccfbf1,stroke:#0f766e,color:#0f3f3a,stroke-width:2.5px
+    classDef activity fill:#e0f2fe,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
+    classDef store fill:#f1f5f9,stroke:#64748b,color:#1e293b,stroke-width:1.5px
+    classDef model fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:1.5px
+
+    class UI front
+    class API api
+    class TS temporal
+    class WF workflow
+    class ACT activity
+    class DB store
+    class LLM model
+
+    style client fill:#f8fafc,stroke:#cbd5e1,color:#334155
+    style control fill:#f8fafc,stroke:#cbd5e1,color:#334155
+    style durable fill:#f8fafc,stroke:#cbd5e1,color:#334155
 ```
 
 > [!NOTE]
@@ -117,38 +132,50 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    START(["Run created via API"]) --> W1["🌅 Wake 1 — workflow start"]
+    START(["Run created via API"]) --> W1["Wake 1 — workflow start"]
     W1 --> DECIDE
 
-    SLEEP{{"💤 Durable sleep<br/>wait_condition + timer"}}
+    SLEEP{{"Durable sleep<br/>wait_condition + timer"}}
     SLEEP -->|"Signal: order_event"| POLICY
-    SLEEP -->|"timer fires"| W3["⏰ Wake 3 — scheduled review"]
+    SLEEP -->|"timer fires"| W3["Wake 3 — scheduled review"]
     W3 --> DECIDE
 
     POLICY{"Wake policy"}
-    POLICY -->|"routine event"| STATE["Update order state only<br/><i>agent never consulted</i>"]
+    POLICY -->|"routine event"| STATE["Update order state only<br/>agent never consulted"]
     STATE --> TERM
-    POLICY -->|"important event"| W2["🚨 Wake 2 — important Signal"]
+    POLICY -->|"important event"| W2["Wake 2 — important Signal"]
     W2 --> DECIDE
 
-    DECIDE["🤖 Agent Activity<br/>validated structured decision"]
+    DECIDE["Agent Activity<br/>validated structured decision"]
     DECIDE --> GATE{"Action needs<br/>approval?"}
-    GATE -->|no| RUN["Execute action Activities"]
-    GATE -->|yes| HOLD["✋ Hold — AWAITING_APPROVAL"]
+    GATE -->|"no"| RUN["Execute action Activities"]
+    GATE -->|"yes"| HOLD["Hold — AWAITING_APPROVAL"]
     HOLD -->|"approve Signal"| RUN
     HOLD -->|"reject Signal"| DROPPED["Recorded, never executed"]
     RUN --> MEM["Update memory + timeline"]
     DROPPED --> MEM
     MEM --> TERM{"Terminal rule met?"}
-    TERM -->|no| SLEEP
-    TERM -->|yes| FINAL["📋 Finalization Activity<br/>summary · learnings · recommendations"]
-    FINAL --> DONE(["✅ COMPLETED / TERMINATED"])
+    TERM -->|"no"| SLEEP
+    TERM -->|"yes"| FINAL["Finalization Activity<br/>summary · learnings · recommendations"]
+    FINAL --> DONE(["COMPLETED / TERMINATED"])
 
-    style POLICY fill:#fef3c7,stroke:#b45309,stroke-width:2px
-    style GATE fill:#fef3c7,stroke:#b45309,stroke-width:2px
-    style TERM fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
-    style SLEEP fill:#e0f2fe,stroke:#0369a1,stroke-width:2px
-    style DECIDE fill:#ede9fe,stroke:#6d28d9,stroke-width:2px
+    classDef wake fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:1.5px
+    classDef decide fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
+    classDef branch fill:#fef3c7,stroke:#d97706,color:#713f12,stroke-width:2px
+    classDef terminal fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:2px
+    classDef sleep fill:#e0f2fe,stroke:#0284c7,color:#0a4a6b,stroke-width:2px
+    classDef step fill:#f1f5f9,stroke:#94a3b8,color:#1e293b,stroke-width:1.5px
+    classDef good fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1.5px
+    classDef endpoint fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
+
+    class W1,W2,W3 wake
+    class DECIDE decide
+    class POLICY,GATE branch
+    class TERM terminal
+    class SLEEP sleep
+    class STATE,RUN,HOLD,DROPPED,MEM step
+    class FINAL good
+    class START,DONE endpoint
 ```
 
 ---
@@ -267,11 +294,11 @@ There is **no polling loop anywhere** in the system. A paused run stops processi
 
 ### Three ways the agent wakes
 
-```text
-   🌅  Workflow start        →  establish a baseline, schedule the first review
-   🚨  An important Signal   →  decided by the wake policy, not by the event arriving
-   ⏰  The durable timer     →  a scheduled review with no external trigger
-```
+| Trigger | What it is for |
+| :--- | :--- |
+| **Workflow start** | Establish a baseline and schedule the first review |
+| **An important Signal** | Decided by the wake policy, not merely by the event arriving |
+| **The durable timer** | A scheduled review with no external trigger |
 
 ### Durability — the worker is disposable
 
@@ -300,20 +327,33 @@ It only happens at a quiet point: never mid-event, never while an approval is pe
 ```mermaid
 flowchart LR
     E["Event arrives"] --> A{"Known lifecycle<br/>event type?"}
-    A -->|yes| T["<b>Level A</b><br/>deterministic table<br/><i>free, instant</i>"]
-    A -->|"unknown type<br/>or free-text<br/>customer message"| B["<b>Level B</b><br/>lightweight classifier"]
+    A -->|"yes"| T["Level A<br/>deterministic table<br/>free · instant"]
+    A -->|"unknown type or<br/>free-text customer message"| B["Level B<br/>lightweight classifier"]
     B -->|"provider fails"| FB["Deterministic fallback"]
     T --> CAP{"Meets the supervisor's<br/>wake sensitivity?"}
     B --> CAP
     FB --> CAP
-    CAP -->|no| NOWAKE["State updated<br/><b>agent not consulted</b>"]
-    CAP -->|yes| WAKE["Wake the agent"]
+    CAP -->|"no"| NOWAKE["State updated<br/>agent not consulted"]
+    CAP -->|"yes"| WAKE["Wake the agent"]
     NOWAKE --> REC["WAKE_DECISION recorded<br/>with the rule that decided"]
     WAKE --> REC
 
-    style T fill:#dcfce7,stroke:#15803d,stroke-width:2px
-    style B fill:#ede9fe,stroke:#6d28d9,stroke-width:2px
-    style CAP fill:#fef3c7,stroke:#b45309,stroke-width:2px
+    classDef entry fill:#e2e8f0,stroke:#475569,color:#1e293b,stroke-width:1.5px
+    classDef branch fill:#fef3c7,stroke:#d97706,color:#713f12,stroke-width:2px
+    classDef levelA fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:2px
+    classDef levelB fill:#ede9fe,stroke:#7c3aed,color:#432c83,stroke-width:2px
+    classDef fallback fill:#f1f5f9,stroke:#94a3b8,color:#1e293b,stroke-width:1.5px
+    classDef quiet fill:#f1f5f9,stroke:#94a3b8,color:#334155,stroke-width:1.5px
+    classDef loud fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:2px
+
+    class E entry
+    class A,CAP branch
+    class T levelA
+    class B levelB
+    class FB fallback
+    class NOWAKE quiet
+    class WAKE loud
+    class REC entry
 ```
 
 **Level A** is a deterministic table over events whose meaning is fixed by the domain — `payment_failed`, `refund_requested`, `order_cancelled` are critical; `shipment_delayed`, `delivered`, `refund_completed` are high; `order_created`, `payment_confirmed`, `shipment_created` are low and normally update state without waking the agent. This path is free and runs first.
@@ -411,10 +451,10 @@ Then open **<http://127.0.0.1:3000>**.
 
 | Service | Address |
 | :--- | :--- |
-| 🖥️ Frontend | <http://127.0.0.1:3000> |
-| 📘 API docs | <http://127.0.0.1:8000/docs> |
-| ⚙️ Temporal UI | <http://127.0.0.1:8233> |
-| 🗄️ PostgreSQL | `127.0.0.1:5432` |
+| Frontend | <http://127.0.0.1:3000> |
+| API docs | <http://127.0.0.1:8000/docs> |
+| Temporal UI | <http://127.0.0.1:8233> |
+| PostgreSQL | `127.0.0.1:5432` |
 
 > [!NOTE]
 > **All three processes are required.** The API starts workflows, the worker executes them, the frontend drives the API. With the worker stopped, runs are created but never progress — which is also exactly how the durability demo works.
