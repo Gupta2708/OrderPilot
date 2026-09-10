@@ -72,14 +72,52 @@ def _classify_customer_message(event: OrderEvent) -> tuple[Severity, str, str]:
     return Severity.LOW, "customer", "Routine customer message; state updated without waking."
 
 
+def needs_classification(event: OrderEvent) -> bool:
+    """True when the cheap rules cannot honestly answer on their own.
+
+    Unknown event types have no entry in the table, and a customer message can
+    mean anything from "thanks!" to "I am cancelling and calling my lawyer".
+    These are the cases Level B exists for.
+    """
+    return (not event.is_known) or event.type == EventType.CUSTOMER_MESSAGE_RECEIVED
+
+
+def meets_threshold(severity: Severity, aggressiveness: WakeAggressiveness) -> bool:
+    """Whether a severity is high enough to wake at this sensitivity."""
+    return _at_least(severity, _WAKE_THRESHOLD[aggressiveness])
+
+
+def evaluate_fast_path(
+    event: OrderEvent,
+    aggressiveness: WakeAggressiveness = WakeAggressiveness.BALANCED,
+) -> WakeEvaluation | None:
+    """Level A only. Returns None when the decision should be classified."""
+    if needs_classification(event):
+        return None
+    severity, category = _SEVERITY_BY_EVENT[event.type]
+    wake_now = meets_threshold(severity, aggressiveness)
+    reason = (
+        f"'{event.type}' is {severity} severity, at or above the {aggressiveness} wake threshold."
+        if wake_now
+        else f"'{event.type}' is {severity} severity; state updated without waking the agent."
+    )
+    return WakeEvaluation(
+        wake_now=wake_now,
+        severity=severity,
+        category=category,
+        reason=reason,
+        rule="deterministic_severity_table",
+    )
+
+
 def evaluate_wake(
     event: OrderEvent,
     aggressiveness: WakeAggressiveness = WakeAggressiveness.BALANCED,
 ) -> WakeEvaluation:
-    """Stage 1 deterministic wake policy (Level A only).
+    """Fully deterministic evaluation of any event.
 
-    Unknown events are escalated rather than dropped. Stage 5 adds the
-    lightweight AI classifier for the ambiguous cases this layer defers.
+    Used as the safe fallback when the classifier is unavailable or returns
+    something unusable, and by the mock provider.
     """
     threshold = _WAKE_THRESHOLD[aggressiveness]
 

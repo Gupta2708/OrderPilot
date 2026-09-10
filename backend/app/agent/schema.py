@@ -9,7 +9,7 @@ the action allow-list are resolved inside the Activity.
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.domain.actions import ALL_ACTIONS
 from app.domain.decision import DecisionKind, ProposedAction, SupervisorDecision
@@ -30,6 +30,29 @@ class SleepSpec(BaseModel):
     wake_at: str | None = None
 
 
+class ActionArguments(BaseModel):
+    """What an action actually says.
+
+    Named explicitly rather than left as a free-form object: a bare
+    `dict[str, Any]` gives the model no schema to fill in, and it reliably
+    returns `{}`, which would reduce every message to a generic default.
+    Extra keys are still allowed so callers can attach their own context.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    message: str | None = Field(
+        default=None,
+        max_length=800,
+        description="The message to send. Required for every message_* tool.",
+    )
+    note: str | None = Field(
+        default=None,
+        max_length=800,
+        description="The note to record. Required for create_internal_note.",
+    )
+
+
 class ProposedActionModel(BaseModel):
     tool: Literal[
         "message_fulfillment_team",
@@ -38,7 +61,7 @@ class ProposedActionModel(BaseModel):
         "message_customer",
         "create_internal_note",
     ]
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: ActionArguments = Field(default_factory=ActionArguments)
 
 
 class AgentDecisionModel(BaseModel):
@@ -89,7 +112,12 @@ def normalize(
     rejected: list[str] = []
     for action in model.actions[:MAX_ACTIONS_PER_DECISION]:
         if action.tool in allowed_actions and action.tool in ALL_ACTIONS:
-            kept.append(ProposedAction(tool=action.tool, arguments=dict(action.arguments)))
+            kept.append(
+                ProposedAction(
+                    tool=action.tool,
+                    arguments=action.arguments.model_dump(exclude_none=True),
+                )
+            )
         else:
             rejected.append(action.tool)
 
@@ -112,6 +140,15 @@ def normalize(
     )
 
 
+class WakeClassification(BaseModel):
+    """Level B output: a cheap, structured judgement on one ambiguous event."""
+
+    wake_now: bool
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    category: str = Field(min_length=1, max_length=60)
+    reason: str = Field(min_length=1, max_length=300)
+
+
 def parse_decision(raw: str | dict[str, Any]) -> AgentDecisionModel:
     """Parse raw model output, raising ValidationError on anything malformed."""
     if isinstance(raw, str):
@@ -122,7 +159,9 @@ def parse_decision(raw: str | dict[str, Any]) -> AgentDecisionModel:
 DECISION_JSON_SCHEMA_HINT = AgentDecisionModel.model_json_schema()
 
 __all__ = [
+    "ActionArguments",
     "AgentDecisionModel",
+    "WakeClassification",
     "DECISION_JSON_SCHEMA_HINT",
     "MAX_ACTIONS_PER_DECISION",
     "ProposedActionModel",

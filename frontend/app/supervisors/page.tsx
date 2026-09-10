@@ -27,6 +27,7 @@ export default function SupervisorsPage() {
     "Supervise this order until it reaches a terminal state. Escalate risks early and keep the customer informed.",
   );
   const [actions, setActions] = useState<string[]>(ALL_ACTIONS);
+  const [approvalActions, setApprovalActions] = useState<string[]>(["message_customer"]);
   const [aggressiveness, setAggressiveness] = useState("BALANCED");
   const [wakeMinutes, setWakeMinutes] = useState(60);
   const [maxAgeMinutes, setMaxAgeMinutes] = useState(7 * 24 * 60);
@@ -48,6 +49,12 @@ export default function SupervisorsPage() {
     );
   }
 
+  function toggleApproval(action: string) {
+    setApprovalActions((current) =>
+      current.includes(action) ? current.filter((item) => item !== action) : [...current, action],
+    );
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setSaving(true);
@@ -60,6 +67,7 @@ export default function SupervisorsPage() {
         wake_aggressiveness: aggressiveness,
         default_wake_minutes: wakeMinutes,
         max_age_minutes: maxAgeMinutes,
+        require_approval_for: approvalActions,
       });
       await load();
     } catch (caught) {
@@ -122,6 +130,28 @@ export default function SupervisorsPage() {
                       type="checkbox"
                       checked={actions.includes(action)}
                       onChange={() => toggleAction(action)}
+                      className="h-4 w-4 rounded border-slate-300 text-teal-700"
+                    />
+                    {titleCase(action)}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend className="text-xs font-medium text-slate-700">
+                Require human approval before running
+              </legend>
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                These actions are proposed but held until someone approves them.
+              </p>
+              <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                {ALL_ACTIONS.filter((action) => actions.includes(action)).map((action) => (
+                  <label key={action} className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={approvalActions.includes(action)}
+                      onChange={() => toggleApproval(action)}
                       className="h-4 w-4 rounded border-slate-300 text-teal-700"
                     />
                     {titleCase(action)}
@@ -200,6 +230,9 @@ export default function SupervisorsPage() {
                     {supervisor.allowed_actions.length} actions ·{" "}
                     {supervisor.config.wake_aggressiveness ?? "BALANCED"} · review every{" "}
                     {supervisor.config.default_wake_minutes ?? 60}m
+                    {supervisor.config.require_approval_for?.length
+                      ? ` · ${supervisor.config.require_approval_for.length} need approval`
+                      : ""}
                   </p>
                 </li>
               ))}

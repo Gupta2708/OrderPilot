@@ -33,6 +33,8 @@ class RunParams:
     max_age_minutes: int = DEFAULT_MAX_AGE_MINUTES
     initial_instructions: list[str] = field(default_factory=list)
     order_context: dict[str, Any] = field(default_factory=dict)
+    # Tools that a human must approve before they execute.
+    require_approval_for: list[str] = field(default_factory=list)
 
 
 @dataclass

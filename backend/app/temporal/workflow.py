@@ -22,15 +22,24 @@ with workflow.unsafe.imports_passed_through():
         terminal_reason_for_event,
     )
     from app.domain.order_state import apply_event, initial_order_state
-    from app.domain.wake_policy import WakeAggressiveness, WakeEvaluation, evaluate_wake
+    from app.domain.wake_policy import (
+        Severity,
+        WakeAggressiveness,
+        WakeEvaluation,
+        evaluate_fast_path,
+        evaluate_wake,
+    )
     from app.temporal.activities import (
         ActionRequest,
+        ClassifyRequest,
+        ClassifyResponse,
         DecisionRequest,
         DecisionResponse,
         FinalizeRequest,
         FinalizeResponse,
         MemoryRequest,
         SnapshotRequest,
+        classify_event,
         compact_run_memory,
         finalize_run,
         make_decision,
@@ -50,6 +59,7 @@ ACTION_TIMEOUT = timedelta(seconds=30)
 MEMORY_TIMEOUT = timedelta(seconds=30)
 FINALIZE_TIMEOUT = timedelta(minutes=1)
 PERSIST_TIMEOUT = timedelta(seconds=30)
+CLASSIFY_TIMEOUT = timedelta(seconds=45)
 
 
 class ActivityType:
@@ -64,6 +74,9 @@ class ActivityType:
     ACTION_EXECUTED = "ACTION_EXECUTED"
     ACTION_FAILED = "ACTION_FAILED"
     ACTION_REJECTED = "ACTION_REJECTED"
+    ACTION_PENDING_APPROVAL = "ACTION_PENDING_APPROVAL"
+    ACTION_APPROVED = "ACTION_APPROVED"
+    ACTION_DENIED = "ACTION_DENIED"
     MEMORY_UPDATED = "MEMORY_UPDATED"
     SLEEP_SCHEDULED = "SLEEP_SCHEDULED"
     INSTRUCTION_ADDED = "INSTRUCTION_ADDED"
@@ -88,6 +101,11 @@ class OrderSupervisorWorkflow:
         self._unpersisted: list[dict[str, Any]] = []
         self._memory_summary: str = ""
         self._executed_actions: list[dict[str, Any]] = []
+        self._pending_approvals: list[dict[str, Any]] = []
+        self._approved_queue: list[dict[str, Any]] = []
+        # Set when a persistence write fails, so unflushed rows stop re-waking
+        # the loop; they are retried at the next natural flush instead.
+        self._persist_blocked = False
         self._latest_decision: dict[str, Any] | None = None
         self._latest_wake: dict[str, Any] | None = None
         self._next_wake_at: datetime | None = None
@@ -107,6 +125,10 @@ class OrderSupervisorWorkflow:
             "scheduled_reviews": 0,
             "instructions_added": 0,
             "fallback_decisions": 0,
+            "classifier_calls": 0,
+            "approvals_granted": 0,
+            "approvals_denied": 0,
+            "persist_failures": 0,
         }
 
     # ------------------------------------------------------------------ run
@@ -139,7 +161,11 @@ class OrderSupervisorWorkflow:
                 # A paused run takes no agent action but stays terminable.
                 await self._persist()
                 await workflow.wait_condition(
-                    lambda: not self._paused or self._terminate_requested or bool(self._unpersisted)
+                    lambda: (
+                        not self._paused
+                        or self._terminate_requested
+                        or (bool(self._unpersisted) and not self._persist_blocked)
+                    )
                 )
                 continue
 
@@ -167,6 +193,7 @@ class OrderSupervisorWorkflow:
             if self._paused:
                 continue
 
+            await self._settle_approvals()
             await self._drain_pending_events()
             await self._persist()
 
@@ -212,6 +239,30 @@ class OrderSupervisorWorkflow:
         self._paused = False
         self._record(ActivityType.RUN_RESUMED, {})
 
+    @workflow.signal(name="approve_action")
+    def approve_action(self, approval_id: str) -> None:
+        """Release one pending action for execution."""
+        approval = self._take_approval(approval_id)
+        if approval is None:
+            return
+        self._stats["approvals_granted"] += 1
+        self._approved_queue.append(approval)
+
+    @workflow.signal(name="reject_action")
+    def reject_action(self, approval_id: str, reason: str = "Rejected by operator") -> None:
+        """Discard a pending action. It is never executed."""
+        approval = self._take_approval(approval_id)
+        if approval is None:
+            return
+        self._stats["approvals_denied"] += 1
+        self._record(ActivityType.ACTION_DENIED, {**approval, "reason": reason})
+
+    def _take_approval(self, approval_id: str) -> dict[str, Any] | None:
+        for index, approval in enumerate(self._pending_approvals):
+            if approval["approval_id"] == approval_id:
+                return self._pending_approvals.pop(index)
+        return None
+
     @workflow.signal(name="terminate")
     def terminate(self, reason: str = "Manually terminated") -> None:
         """Works while sleeping and while paused."""
@@ -237,6 +288,7 @@ class OrderSupervisorWorkflow:
             "latest_decision": self._latest_decision,
             "latest_wake_decision": self._latest_wake,
             "executed_actions": list(self._executed_actions),
+            "pending_approvals": list(self._pending_approvals),
             "next_wake_at": self._iso(self._next_wake_at),
             "last_wake_at": self._iso(self._last_wake_at),
             "pending_events": len(self._pending_events),
@@ -257,7 +309,8 @@ class OrderSupervisorWorkflow:
         # still wake the loop so that row reaches Postgres promptly.
         return (
             bool(self._pending_events)
-            or bool(self._unpersisted)
+            or (bool(self._unpersisted) and not self._persist_blocked)
+            or bool(self._approved_queue)
             or self._terminate_requested
             or self._paused
         )
@@ -285,7 +338,7 @@ class OrderSupervisorWorkflow:
             )
             self._order_state = apply_event(self._order_state, event)
 
-            evaluation = evaluate_wake(event, self._aggressiveness())
+            evaluation = await self._evaluate_wake(event)
             self._latest_wake = dict(evaluation.as_dict())
             self._latest_wake["event_id"] = event.event_id
             self._latest_wake["event_type"] = event.type
@@ -302,6 +355,39 @@ class OrderSupervisorWorkflow:
             if reason is not None:
                 self._terminal_reason = reason
                 return
+
+    async def _evaluate_wake(self, event: OrderEvent) -> WakeEvaluation:
+        """Hybrid wake policy: cheap rules first, classifier only when needed."""
+        fast = evaluate_fast_path(event, self._aggressiveness())
+        if fast is not None:
+            return fast
+
+        self._stats["classifier_calls"] += 1
+        try:
+            result: ClassifyResponse = await workflow.execute_activity(
+                classify_event,
+                ClassifyRequest(
+                    event={
+                        "event_id": event.event_id,
+                        "type": event.type,
+                        "payload": event.payload,
+                    },
+                    order_state=self._order_state,
+                    wake_guidance=[],
+                    aggressiveness=str(self._aggressiveness()),
+                ),
+                start_to_close_timeout=CLASSIFY_TIMEOUT,
+                retry_policy=ACTION_RETRY,
+            )
+        except Exception:  # noqa: BLE001 - triage must never break the run
+            return evaluate_wake(event, self._aggressiveness())
+        return WakeEvaluation(
+            wake_now=result.wake_now,
+            severity=Severity(result.severity),
+            category=result.category,
+            reason=result.reason,
+            rule=result.rule,
+        )
 
     async def _wake(
         self,
@@ -364,24 +450,48 @@ class OrderSupervisorWorkflow:
     async def _execute_actions(self, actions: list[dict[str, Any]]) -> None:
         assert self._params is not None
         for action in actions:
-            result: dict[str, Any] = await workflow.execute_activity(
-                run_business_action,
-                ActionRequest(
-                    order_id=self._params.order_id,
-                    tool=str(action.get("tool", "")),
-                    arguments=dict(action.get("arguments", {})),
-                    allowed_actions=list(self._params.allowed_actions),
-                ),
-                start_to_close_timeout=ACTION_TIMEOUT,
-                retry_policy=ACTION_RETRY,
-            )
-            if result.get("ok"):
-                self._stats["actions_executed"] += 1
-                self._executed_actions.append(result)
-                self._record(ActivityType.ACTION_EXECUTED, result)
-            else:
-                self._stats["actions_failed"] += 1
-                self._record(ActivityType.ACTION_FAILED, result)
+            tool = str(action.get("tool", ""))
+            arguments = dict(action.get("arguments", {}))
+            if tool in self._params.require_approval_for:
+                # Sensitive action: queue it for a human instead of executing.
+                approval = {
+                    "approval_id": str(workflow.uuid4()),
+                    "tool": tool,
+                    "arguments": arguments,
+                    "requested_at": self._iso(workflow.now()),
+                }
+                self._pending_approvals.append(approval)
+                self._record(ActivityType.ACTION_PENDING_APPROVAL, approval)
+                continue
+            await self._run_action(tool, arguments)
+
+    async def _run_action(self, tool: str, arguments: dict[str, Any]) -> None:
+        assert self._params is not None
+        result: dict[str, Any] = await workflow.execute_activity(
+            run_business_action,
+            ActionRequest(
+                order_id=self._params.order_id,
+                tool=tool,
+                arguments=arguments,
+                allowed_actions=list(self._params.allowed_actions),
+            ),
+            start_to_close_timeout=ACTION_TIMEOUT,
+            retry_policy=ACTION_RETRY,
+        )
+        if result.get("ok"):
+            self._stats["actions_executed"] += 1
+            self._executed_actions.append(result)
+            self._record(ActivityType.ACTION_EXECUTED, result)
+        else:
+            self._stats["actions_failed"] += 1
+            self._record(ActivityType.ACTION_FAILED, result)
+
+    async def _settle_approvals(self) -> None:
+        """Execute anything a human approved since the last pass."""
+        while self._approved_queue:
+            approval = self._approved_queue.pop(0)
+            self._record(ActivityType.ACTION_APPROVED, approval)
+            await self._run_action(str(approval["tool"]), dict(approval["arguments"]))
 
     async def _update_memory(self, memory_update: str) -> None:
         if not memory_update:
@@ -478,25 +588,35 @@ class OrderSupervisorWorkflow:
         if not pending and final_output is None:
             return
         completed_at = workflow.now() if final_output is not None else None
-        await workflow.execute_activity(
-            persist_snapshot,
-            SnapshotRequest(
-                run_id=self._params.run_id,
-                status=str(self._current_status()),
-                order_state=self._order_state,
-                memory_summary=self._memory_summary,
-                run_instructions=list(self._instructions),
-                latest_decision=self._latest_decision,
-                next_wake_at=self._iso(self._next_wake_at),
-                last_wake_at=self._iso(self._last_wake_at),
-                stats=dict(self._stats),
-                final_output=final_output,
-                completed_at=self._iso(completed_at),
-                activities=pending,
-            ),
-            start_to_close_timeout=PERSIST_TIMEOUT,
-            retry_policy=ACTION_RETRY,
+        request = SnapshotRequest(
+            run_id=self._params.run_id,
+            status=str(self._current_status()),
+            order_state=self._order_state,
+            memory_summary=self._memory_summary,
+            run_instructions=list(self._instructions),
+            latest_decision=self._latest_decision,
+            next_wake_at=self._iso(self._next_wake_at),
+            last_wake_at=self._iso(self._last_wake_at),
+            stats=dict(self._stats),
+            final_output=final_output,
+            completed_at=self._iso(completed_at),
+            activities=pending,
         )
+        try:
+            await workflow.execute_activity(
+                persist_snapshot,
+                request,
+                start_to_close_timeout=PERSIST_TIMEOUT,
+                retry_policy=ACTION_RETRY,
+            )
+        except Exception:  # noqa: BLE001 - reporting must not stop supervision
+            # Temporal owns execution truth; Postgres only mirrors it for the
+            # product. If the mirror is unavailable the run keeps going and the
+            # buffered rows are retried on the next flush.
+            self._stats["persist_failures"] += 1
+            self._persist_blocked = True
+            return
+        self._persist_blocked = False
         del self._unpersisted[: len(pending)]
 
     def _recent_activity(self) -> list[dict[str, Any]]:
@@ -526,6 +646,8 @@ class OrderSupervisorWorkflow:
             return status_for_terminal_reason(self._terminal_reason)
         if self._paused:
             return RunStatus.PAUSED
+        if self._pending_approvals:
+            return RunStatus.AWAITING_APPROVAL
         return self._status
 
     def _record(self, activity_type: str, payload: dict[str, Any]) -> None:

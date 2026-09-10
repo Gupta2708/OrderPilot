@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.domain.actions import ALL_ACTIONS
+from app.domain.actions import ALL_ACTIONS, BusinessAction
 from app.domain.wake_policy import WakeAggressiveness
 
 MAX_INSTRUCTION_CHARS = 1000
@@ -19,8 +19,12 @@ class SupervisorCreate(BaseModel):
     wake_aggressiveness: WakeAggressiveness = WakeAggressiveness.BALANCED
     default_wake_minutes: int = Field(default=60, ge=1, le=7 * 24 * 60)
     max_age_minutes: int = Field(default=7 * 24 * 60, ge=1)
+    # Sensitive tools a human must approve. Defaults to messaging the customer.
+    require_approval_for: list[str] = Field(
+        default_factory=lambda: [str(BusinessAction.MESSAGE_CUSTOMER)]
+    )
 
-    @field_validator("allowed_actions")
+    @field_validator("allowed_actions", "require_approval_for")
     @classmethod
     def _known_actions_only(cls, value: list[str]) -> list[str]:
         unknown = [action for action in value if action not in ALL_ACTIONS]
@@ -98,6 +102,10 @@ class InstructionCreate(BaseModel):
     instruction: str = Field(min_length=1, max_length=MAX_INSTRUCTION_CHARS)
 
 
+class ApprovalDecision(BaseModel):
+    reason: str = Field(default="Rejected by operator", max_length=500)
+
+
 class TerminateRequest(BaseModel):
     reason: str = Field(default="Manually terminated", max_length=500)
 
@@ -123,6 +131,7 @@ class RunStateResponse(BaseModel):
     latest_decision: dict[str, Any] | None = None
     latest_wake_decision: dict[str, Any] | None = None
     executed_actions: list[dict[str, Any]] = Field(default_factory=list)
+    pending_approvals: list[dict[str, Any]] = Field(default_factory=list)
     next_wake_at: str | None = None
     last_wake_at: str | None = None
     pending_events: int = 0

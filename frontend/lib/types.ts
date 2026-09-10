@@ -15,6 +15,7 @@ export interface Supervisor {
     wake_aggressiveness?: string;
     default_wake_minutes?: number;
     max_age_minutes?: number;
+    require_approval_for?: string[];
   };
   created_at: string;
 }
@@ -93,6 +94,13 @@ export interface RunDetail extends RunSummary {
   timeline: ActivityEntry[];
 }
 
+export interface PendingApproval {
+  approval_id: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  requested_at: string | null;
+}
+
 export interface RunState {
   run_id: string;
   order_id: string;
@@ -107,6 +115,7 @@ export interface RunState {
   latest_decision: AgentDecision | null;
   latest_wake_decision: WakeDecision | null;
   executed_actions: Record<string, unknown>[];
+  pending_approvals: PendingApproval[];
   next_wake_at: string | null;
   last_wake_at: string | null;
   pending_events: number;

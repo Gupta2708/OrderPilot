@@ -130,9 +130,13 @@ Decisions are made in an Activity, never in workflow code, and every decision is
 
 | Setting | Meaning |
 | --- | --- |
-| `LLM_PROVIDER=mock` | Default. Deterministic decisions, no API key, no network. |
-| `LLM_PROVIDER=claude` | Real provider via the Anthropic SDK. Needs `ANTHROPIC_API_KEY`. |
+| `LLM_PROVIDER=mock` | Deterministic decisions, no API key, no network. Use it for demos and offline work. |
+| `LLM_PROVIDER=openrouter` | Real provider via OpenRouter, which is OpenAI-compatible. Needs `OPENROUTER_API_KEY` (`sk-or-...`). |
+| `LLM_PROVIDER=claude` | Real provider via the Anthropic API directly. Needs `ANTHROPIC_API_KEY` (`sk-ant-...`). |
+| `OPENROUTER_MODEL` | Defaults to `anthropic/claude-sonnet-4.5`. |
 | `ANTHROPIC_MODEL` | Defaults to `claude-opus-5`. |
+
+The selected provider serves both the main agent and the wake classifier. Copy `.env.example` to `.env` and set the key there; `.env` is gitignored. The test suite always forces the mock provider, so running tests never makes a paid API call regardless of local configuration.
 
 The agent returns a fixed structure: decision, priority, one-or-two-sentence reason summary, actions, memory update, sleep interval, and a completion recommendation. Anything outside that schema is rejected. Tool names are constrained by the schema itself, then filtered again against the supervisor's allowed actions, and re-checked once more at execution time.
 
@@ -194,4 +198,27 @@ The UI polls the API every two seconds. Runs progress on their own, so state cha
 
 `NEXT_PUBLIC_API_BASE_URL` overrides the API location; see `frontend/.env.example`. The default works with the setup above.
 
-See [architecture](docs/ARCHITECTURE.md). Stage 5 adds the AI wake classifier, the human approval gate, and the worker-restart durability demo.
+## Wake policy and approvals (Stage 5)
+
+The wake policy is hybrid, in two levels.
+
+**Level A** is a deterministic table over known lifecycle events. `payment_failed`, `refund_requested`, and `order_cancelled` are critical; `shipment_delayed`, `delivered`, and `refund_completed` are high; `order_created`, `payment_confirmed`, and `shipment_created` are low and normally update state without waking the agent. This path is free and runs first.
+
+**Level B** is a lightweight structured classifier, and it runs *only* when Level A cannot honestly answer: an unrecognised event type, or a customer message, which can mean anything from "thanks!" to "cancel my order". It returns `wake_now`, `severity`, `category`, and a reason, all validated. If it fails or returns something unusable, triage falls back to deterministic rules, so the wake path never depends on the model being up. The wake sensitivity still governs the outcome: the classifier judges severity, the supervisor's configuration decides whether that severity is enough to wake.
+
+Every wake and no-wake decision is recorded on the timeline with the rule that produced it, so the control room always shows why the agent was or was not consulted.
+
+**Approval gate.** A supervisor can require human approval for sensitive actions; `message_customer` is required by default. A gated action is proposed but not executed: the run reports `AWAITING_APPROVAL`, the action appears in the control room with Approve and Reject, and nothing runs until someone decides. Rejecting records the decision and the action is never executed. Actions outside the approval list continue to execute immediately.
+
+## Worker-restart durability
+
+The workflow lives in Temporal, not in the worker process, so a worker restart loses nothing. To demonstrate it:
+
+1. Start a run and drive it to a sleeping state.
+2. Stop the worker (Ctrl+C). The API and UI keep serving; the run still reports its state, and the countdown to the next wake keeps running.
+3. Inject an event from the UI. It is accepted — Temporal holds the Signal durably. Nothing processes it yet.
+4. Start the worker again. The run picks the event up, wakes, decides, and continues, with its memory and timeline intact.
+
+`tests/test_p1.py::test_run_survives_a_worker_restart_while_sleeping` automates exactly this against a real dev server, including the window where no worker exists at all.
+
+See [architecture](docs/ARCHITECTURE.md). Stage 6 adds run analytics, adaptive wake guidance, Continue-As-New, and supervisor templates.

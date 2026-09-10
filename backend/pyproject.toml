@@ -12,6 +12,7 @@ dependencies = [
   "alembic>=1.15,<2",
   "temporalio>=1.10,<2",
   "anthropic>=1,<2",
+  "openai>=1.60,<3",
 ]
 
 [dependency-groups]

@@ -6,9 +6,10 @@ import type {
   AgentDecision,
   FinalOutput,
   OrderState,
+  PendingApproval,
   WakeDecision,
 } from "@/lib/types";
-import { Card, EmptyState, SeverityBadge } from "@/components/ui";
+import { Button, Card, EmptyState, SeverityBadge } from "@/components/ui";
 
 const STATE_TONE: Record<string, string> = {
   confirmed: "text-emerald-700",
@@ -148,6 +149,9 @@ const TIMELINE_TONE: Record<string, string> = {
   ACTION_EXECUTED: "bg-emerald-500",
   ACTION_FAILED: "bg-rose-500",
   ACTION_REJECTED: "bg-rose-400",
+  ACTION_PENDING_APPROVAL: "bg-amber-400",
+  ACTION_APPROVED: "bg-emerald-500",
+  ACTION_DENIED: "bg-rose-500",
   EVENT_RECEIVED: "bg-sky-500",
   EVENT_REJECTED: "bg-rose-400",
   EVENT_DUPLICATE_IGNORED: "bg-slate-300",
@@ -299,6 +303,58 @@ export function FinalOutputCard({ output }: { output: FinalOutput }) {
           </div>
         )}
       </div>
+    </Card>
+  );
+}
+
+export function ApprovalsCard({
+  approvals,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  approvals: PendingApproval[];
+  busy: boolean;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
+  if (approvals.length === 0) return null;
+  return (
+    <Card
+      title="Awaiting approval"
+      subtitle="These actions will not run until a human decides"
+      className="border-amber-300 bg-amber-50/40"
+    >
+      <ul className="space-y-3">
+        {approvals.map((approval) => (
+          <li
+            key={approval.approval_id}
+            className="rounded-md border border-amber-200 bg-white p-3"
+          >
+            <p className="text-sm font-semibold text-slate-900">{titleCase(approval.tool)}</p>
+            {typeof approval.arguments.message === "string" && (
+              <p className="mt-1 text-sm leading-6 text-slate-700">
+                &ldquo;{approval.arguments.message}&rdquo;
+              </p>
+            )}
+            <p className="mt-1 text-[11px] text-slate-500">
+              Requested {formatTime(approval.requested_at)}
+            </p>
+            <div className="mt-2 flex gap-2">
+              <Button disabled={busy} onClick={() => onApprove(approval.approval_id)}>
+                Approve
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => onReject(approval.approval_id)}
+              >
+                Reject
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }

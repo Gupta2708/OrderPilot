@@ -22,6 +22,7 @@ async def create_supervisor(payload: SupervisorCreate, session: SessionDep) -> S
             "wake_aggressiveness": str(payload.wake_aggressiveness),
             "default_wake_minutes": payload.default_wake_minutes,
             "max_age_minutes": payload.max_age_minutes,
+            "require_approval_for": payload.require_approval_for,
         },
     )
     return SupervisorResponse.model_validate(supervisor)

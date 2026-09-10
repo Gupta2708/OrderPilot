@@ -20,9 +20,14 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     # "mock" is the default so the product is demonstrable without an API key.
-    llm_provider: Literal["mock", "claude"] = "mock"
+    llm_provider: Literal["mock", "claude", "openrouter"] = "mock"
     anthropic_model: str = Field(default="claude-opus-5", min_length=1)
     anthropic_api_key: str | None = None
+
+    # OpenRouter is OpenAI-compatible, so it uses the OpenAI SDK with this base URL.
+    openrouter_api_key: str | None = None
+    openrouter_model: str = Field(default="anthropic/claude-sonnet-4.5", min_length=1)
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", min_length=1)
 
 
 @lru_cache

@@ -12,6 +12,16 @@ from typing import Any
 
 RECENT_ACTIVITY_LIMIT = 8
 
+CLASSIFIER_SYSTEM_PROMPT = """You triage events for an order supervisor.
+
+Decide only whether this event needs the main supervising agent's attention now.
+You are the cheap first pass, so be decisive and brief.
+
+Wake the agent when the event suggests risk to the order, the delivery, or the
+customer relationship. Do not wake it for routine progress updates.
+
+If the event type is unrecognised, prefer waking the agent and say why."""
+
 SYSTEM_PROMPT = """You are an order operations supervisor for an e-commerce company.
 
 You supervise ONE order. You are woken by the workflow that owns this order's
@@ -46,6 +56,22 @@ class AgentContext:
     recent_activity: list[dict[str, Any]] = field(default_factory=list)
     allowed_actions: list[str] = field(default_factory=list)
     default_wake_minutes: int = 60
+
+
+def build_classifier_prompt(
+    event: dict[str, Any], order_state: dict[str, Any], guidance: list[str] | None = None
+) -> str:
+    """A deliberately small prompt: this path runs often and must stay cheap."""
+    sections = [
+        "Event:",
+        json.dumps(event, indent=2, sort_keys=True),
+        "",
+        "Current order state:",
+        json.dumps(order_state, indent=2, sort_keys=True),
+    ]
+    if guidance:
+        sections += ["", "Standing wake guidance:"] + [f"- {line}" for line in guidance]
+    return "\n".join(sections)
 
 
 def build_user_prompt(context: AgentContext) -> str:

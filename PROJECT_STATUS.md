@@ -1,61 +1,72 @@
 # Project status
 
-## Stage 4 — complete (2026-09-10). P0 is done.
+## Stage 5 — complete (2026-09-10). P0 and P1 are done.
 
-Stage 3 was committed and pushed by the user as `400f891`. The working tree was clean at the start of this stage. Stage 4 adds the operations UI and the event simulator, which completes the P0 acceptance criteria: every assignment requirement can now be demonstrated from a browser. No commit or push has been made by the assistant.
+Stage 4 was committed and pushed by the user as `f799214`. Stage 5 adds the P1 layer: a hybrid wake policy, a human approval gate, and a demonstrated durability story. No commit or push has been made by the assistant.
 
-### Built in Stage 4
+### Built in Stage 5
 
-- `lib/api.ts` — typed API client with a single error path. Network failures and FastAPI validation errors both become readable messages instead of raw statuses.
-- `lib/types.ts`, `lib/format.ts`, `lib/scenarios.ts`, `lib/use-polling.ts` — shared types, countdown and duration formatting, the four scenario presets, and one polling hook every screen uses.
-- `components/ui.tsx` — status and severity badges, cards, stats, buttons, error banners.
-- `components/run-cards.tsx` — order state, latest decision, wake decision, compact memory, unified timeline, action history, and final output.
-- `components/event-simulator.tsx` — scenario presets driven one step at a time, plus arbitrary event injection including an unrecognised type.
-- `app/page.tsx` — dashboard with acting / sleeping / attention / completed buckets and a run table.
-- `app/supervisors/page.tsx` — supervisor list and configuration form.
-- `app/runs/new/page.tsx` — start-run flow with order context and an optional per-run instruction.
-- `app/runs/[runId]/page.tsx` — the Run Control Room.
-- `app/layout.tsx`, `app/icon.svg`, `frontend/.env.example`.
+**Hybrid wake policy.** `evaluate_fast_path` answers only for known lifecycle events and returns `None` for the two cases a table cannot honestly judge: an unrecognised event type, and a customer message. Those go to `classify_event`, a new Activity that asks the provider for a small validated verdict (`wake_now`, `severity`, `category`, `reason`). The classifier never gets the last word: its severity is capped by the supervisor's wake sensitivity, and any failure falls back to deterministic evaluation. Every verdict is recorded with the rule that produced it — `deterministic_severity_table`, `ai_classifier:<provider>`, or `classifier_fallback_deterministic`.
 
-The UI holds no business logic. It renders what the API reports and turns operator intent into API calls; every fact on screen already exists in the workflow or the database. Live workflow state is preferred and labelled as such, with the persisted record as the fallback, so a completed run still renders after its workflow closes.
+**Human approval gate.** Supervisors carry `require_approval_for`, defaulting to `message_customer`. A gated action is proposed but held: the workflow records `ACTION_PENDING_APPROVAL`, reports `AWAITING_APPROVAL`, and executes nothing. `approve_action` and `reject_action` Signals settle it; approved actions are queued and executed by the run loop rather than inside the Signal handler, so execution stays on the deterministic path. There is no code path from a rejection to an execution.
+
+**API and UI.** New endpoints `POST /api/runs/{run_id}/approvals/{approval_id}/approve` and `.../reject`. The supervisor form configures the approval policy, the control room shows an approvals card with Approve and Reject, and the status badge shows `AWAITING_APPROVAL`.
+
+**Durability.** No new mechanism was needed — state already lives in Temporal — so this stage adds the demonstration: a documented manual procedure in the README and an automated test that leaves the task queue genuinely unattended.
+
+New counters: `classifier_calls`, `approvals_granted`, `approvals_denied`.
+
+**One real bug found and fixed.** Signals with two arguments were being sent positionally, which the SDK rejects; `reject_action` (approval id plus reason) was the first two-argument Signal in the system, so nothing had caught it. The service now always uses the explicit `args` list form.
 
 ### Validation performed (2026-09-10)
 
 | Check | Result |
 | --- | --- |
-| `npm run lint` | PASS: 0 errors; 1 known PostCSS anonymous-default-export warning |
-| `npm run typecheck` | PASS |
-| `npm run build` | PASS: 6 routes generated |
-| Backend `pytest` with `RUN_INTEGRATION=1` | PASS: 64 passed, 0 skipped |
+| Backend `pytest` with `RUN_INTEGRATION=1` | PASS: 79 passed, 0 skipped |
+| `pytest tests/test_p1.py` | PASS: 11 P1 tests |
 | Backend `ruff check` / `ruff format --check` / `mypy` strict | PASS |
-| Headless-browser walkthrough of the whole product | PASS: 8 of 8 checks, no console or page errors |
+| Frontend `npm run lint` / `typecheck` / `build` | PASS |
+| Headless-browser P1 walkthrough | PASS: 8 of 8, no console or page errors |
 
-The browser walkthrough drove the real UI against the real stack — Next.js production build, FastAPI, the worker, Temporal, and Postgres — and covered: creating a supervisor and seeing it listed; starting a run and landing on its control room; the control room rendering live workflow state; running the Delivery Crisis scenario step by step until an escalation action executed and appeared in action history; pause reaching `PAUSED`; resume; completion showing the final summary, learnings, and recommendations; the dashboard reflecting the completed run; and a 420px viewport with no horizontal overflow. Screenshots were captured for each step.
+P1 tests cover: routine events never reaching the classifier; ambiguous and unknown events deferring to it; sensitivity still governing the verdict; a broken classifier falling back to deterministic rules while still escalating unknown events; an over-eager classifier being capped by sensitivity; the classifier waking the agent for a risky customer message and declining for a routine one; a sensitive action waiting for approval and then executing once approved; a rejected action never executing; non-sensitive actions still executing directly; and the run surviving a worker restart.
 
-Two issues surfaced during that walkthrough and both were fixed: a missing favicon returned 404 on every page, now served from `app/icon.svg`; and the React compiler lint rule rejected the initial data-loading effects, which is now handled by one documented `usePolling` hook rather than scattered suppressions. A third apparent error — a chunk-loading 500 — was an artifact of my own restart sequence, where a stale `next start` process kept port 3000 while its `.next` directory was rebuilt underneath it. It does not reproduce on a clean start, and the final walkthrough ran with zero browser errors.
+The durability test runs against a real local dev server rather than the time-skipping one, because it deliberately leaves the task queue unattended and the time-skipping server cannot represent that — it waits for workflow progress. The test starts a run, shuts the worker down completely, sends an event into that gap, starts a fresh worker, and asserts the run picks the event up with memory and history intact before completing normally.
+
+The browser walkthrough drove the real stack and confirmed: the approval policy is configurable and shown; a routine event is handled without waking the agent; a customer message is classified (`rule = ai_classifier:mock`); the run reports `AWAITING_APPROVAL` with the action held and `Actions = 0`; rejecting records `ACTION_DENIED` and executes nothing; approving executes the action; and an unknown event type is escalated rather than dropped.
+
+### Live provider verified (2026-09-10, after Stage 5)
+
+The user supplied an OpenRouter key rather than an Anthropic one, so an `OpenRouterProvider` was added alongside `ClaudeProvider`. OpenRouter is OpenAI-compatible, so it uses the OpenAI SDK against `https://openrouter.ai/api/v1`; the workflow, approval gate, and classifier were unchanged, because the provider interface already isolated them. `ClaudeProvider` is retained for an `sk-ant-` key.
+
+**The long-standing "never run against a live API" limitation is now closed.** A full run was driven through the HTTP API against `anthropic/claude-sonnet-4.5`: the start wake produced a real `NO_ACTION` with reasoning; `payment_confirmed` was absorbed by the deterministic fast path without waking the agent; `shipment_delayed` woke it, and it followed the live run instruction, escalating to logistics and writing an internal note; the customer message it drafted was held by the approval gate with its real text visible; approving it executed the send; and `delivered` completed the run with a model-written memory summary and final output.
+
+Three real defects were found and fixed by running against a live model:
+
+1. **Actions came back with empty arguments.** `arguments` was a free-form `dict[str, Any]`, which under a strict JSON schema reliably produced `{}`. The agent could choose an action but never actually say anything, and the executor's safe defaults masked it as generic canned text. Fixed by giving arguments an explicit schema with described `message` and `note` fields.
+2. **A persistence failure wedged the whole run.** `persist_snapshot` failures propagated and stalled the workflow loop. Since Temporal owns execution truth and Postgres only mirrors it, persistence failures are now counted and non-fatal, with the buffered rows retried at the next flush — plus a flag that stops unflushed rows from re-waking the loop, which would otherwise spin.
+3. **The test suite was reading the developer's `.env`** and making real paid API calls, which is why it slowed from 9s to 185s once a key was configured. `tests/conftest.py` now forces the mock provider and strips provider keys, so tests never depend on local configuration and never cost money.
 
 ### Known limitations
 
-- **The Claude provider path still has not run against the live API.** No `ANTHROPIC_API_KEY` is available on this machine, so every run above used the deterministic mock. Unchanged since Stage 2 and still the single most important thing to verify before demonstrating live AI.
-- The UI polls every two seconds rather than streaming. Fine locally; it would need rethinking at scale.
-- No pagination anywhere: the dashboard lists every run and the timeline is capped at 200 entries server-side.
-- No authentication. Anyone who can reach the API can control any run.
-- Supervisors can be created but not edited or deleted from the UI.
-- The approval gate for `message_customer` is not built yet, so the UI has no pending-approval state. That is Stage 5, along with the AI wake classifier and the worker-restart durability demo.
-- Several demo supervisors and completed runs from the walkthrough remain in the local development database as seed data.
+- The classifier is called per ambiguous event with no caching, so a burst of customer messages means a burst of calls — and now those cost money.
+- Only the OpenRouter path has been exercised live. `ClaudeProvider` remains type-checked but unproven at runtime, since no Anthropic key is available.
+- Live runs are slower than the mock: a decision takes seconds, so a run briefly shows `ACTING` where the mock was instant. Any demo script needs to poll rather than sleep for a fixed second.
+- Approvals live in workflow state and the timeline, not in their own table, so there is no cross-run "approval queue" view. Adequate for one order at a time; a real operations tool would want a queue.
+- Approvals have no timeout: a gated action waits indefinitely until someone decides or the run's maximum age ends it.
+- Rejecting from the UI sends a fixed reason. A free-text reason would be better.
+- Adaptive wake guidance is accepted by the classifier prompt but nothing generates it yet; that is Stage 6, along with analytics, Continue-As-New, and supervisor templates.
 
 ### Files and areas changed
 
-- Added: `frontend/lib/` (`api`, `types`, `format`, `scenarios`, `use-polling`), `frontend/components/` (`ui`, `run-cards`, `event-simulator`), `frontend/app/supervisors/page.tsx`, `frontend/app/runs/new/page.tsx`, `frontend/app/runs/[runId]/page.tsx`, `frontend/app/icon.svg`, `frontend/.env.example`.
-- Modified: `frontend/app/layout.tsx` (nav shell), `frontend/app/page.tsx` (landing page replaced by the dashboard), `README.md`, `docs/ARCHITECTURE.md`, this file.
-- Unchanged: the entire backend. No API, workflow, agent, or database change was needed for this stage, which is a good sign for the Stage 3 contract.
+- Added: `backend/tests/test_p1.py`, `frontend` approvals card (in `components/run-cards.tsx`).
+- Modified (backend): `app/domain/wake_policy.py` (fast path, `needs_classification`, `meets_threshold`), `app/domain/lifecycle.py` (`AWAITING_APPROVAL`), `app/agent/schema.py` (`WakeClassification`), `app/agent/prompt.py` (classifier prompt), `app/agent/provider.py` (`classify` on both providers), `app/temporal/activities.py` (`classify_event`), `app/temporal/workflow.py` (hybrid wake, approval gate, approve/reject Signals, counters), `app/temporal/types.py`, `app/services/runs.py` (approve/reject, two-argument Signal fix), `app/api/schemas.py`, `app/api/supervisors.py`, `app/api/runs.py`, `tests/test_api.py`.
+- Modified (frontend): `lib/types.ts`, `lib/api.ts`, `components/run-cards.tsx`, `app/runs/[runId]/page.tsx`, `app/supervisors/page.tsx`.
+- Modified (docs): `README.md`, `docs/ARCHITECTURE.md`, `.env.example`, this file.
 
-### P0 acceptance criteria
-
-All assignment P0 requirements are now demonstrable from the browser: one durable workflow per order; lifecycle events as Signals; wake on start, on important events, and on a durable timer; unimportant events updating state without invoking the main agent; structured business actions from an allow-list; compact memory plus an auditable timeline; durable sleep instead of polling; live run instructions; pause, resume, and terminate; workflow-owned completion; and a final summary with important actions, learnings, and recommendations.
+Live-provider work (after Stage 5): added `OpenRouterProvider` and `_extract_json` in `app/agent/provider.py`, `ActionArguments` in `app/agent/schema.py`, OpenRouter settings in `app/config.py`, the `openai` dependency in `pyproject.toml`/`uv.lock`, `tests/conftest.py`, non-fatal persistence plus the `_persist_blocked` guard and `persist_failures` counter in `app/temporal/workflow.py`, and a resilience test in `tests/test_p1.py`.
 
 ### Next stage
 
-Stage 5 — P1: the lightweight AI wake classifier for ambiguous and unknown events, wake/no-wake audit records, unknown-event escalation, the human approval gate for sensitive actions with a configurable requirement for `message_customer`, approve/reject in the backend and UI, a pending-approval state, decision cards, stronger scenario behaviour, and a documented worker-restart durability demonstration.
+Stage 6 — P2: run analytics; adaptive agent-generated wake guidance that is validated, persisted, and safely consumed by the classifier; Continue-As-New with a configurable low development threshold; and the Standard, VIP/High-Touch, and Cost-Conscious supervisor templates.
 
-**Stage 5 has NOT been started.**
+**Stage 6 has NOT been started.**

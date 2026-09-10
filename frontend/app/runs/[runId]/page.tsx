@@ -11,6 +11,7 @@ import { Button, Card, ErrorBanner, Stat, StatusBadge } from "@/components/ui";
 import { EventSimulator } from "@/components/event-simulator";
 import {
   ActionHistoryCard,
+  ApprovalsCard,
   DecisionCard,
   FinalOutputCard,
   MemoryCard,
@@ -149,6 +150,15 @@ export default function RunControlRoom() {
         <Stat label="No-wake" value={stats.no_wake_events ?? 0} />
         <Stat label="Actions" value={stats.actions_executed ?? 0} />
       </dl>
+
+      <ApprovalsCard
+        approvals={state?.pending_approvals ?? []}
+        busy={busy}
+        onApprove={(approvalId) => act("Approval", () => api.approveAction(runId, approvalId))}
+        onReject={(approvalId) =>
+          act("Rejection", () => api.rejectAction(runId, approvalId, "Rejected from the UI"))
+        }
+      />
 
       {detail.final_output && <FinalOutputCard output={detail.final_output} />}
 

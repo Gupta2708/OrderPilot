@@ -72,6 +72,7 @@ async def start_run(session: AsyncSession, client: Client, request: StartRunRequ
         max_age_minutes=int(request.max_age_minutes or config.get("max_age_minutes", 7 * 24 * 60)),
         initial_instructions=list(request.initial_instructions),
         order_context=dict(request.order_context),
+        require_approval_for=list(config.get("require_approval_for", [])),
     )
 
     try:
@@ -112,13 +113,23 @@ async def resume(client: Client, run: Run) -> None:
     await _signal(client, run, OrderSupervisorWorkflow.resume)
 
 
+async def approve_action(client: Client, run: Run, approval_id: str) -> None:
+    await _signal(client, run, OrderSupervisorWorkflow.approve_action, approval_id)
+
+
+async def reject_action(client: Client, run: Run, approval_id: str, reason: str) -> None:
+    await _signal(client, run, OrderSupervisorWorkflow.reject_action, approval_id, reason)
+
+
 async def terminate(client: Client, run: Run, reason: str) -> None:
     await _signal(client, run, OrderSupervisorWorkflow.terminate, reason)
 
 
 async def _signal(client: Client, run: Run, signal: Any, *args: Any) -> None:
     try:
-        await _handle(client, run).signal(signal, *args)
+        # The SDK takes a single positional argument or an explicit args list;
+        # reject_action sends two, so always pass the list form.
+        await _handle(client, run).signal(signal, args=list(args))
     except RPCError as error:
         raise WorkflowUnavailableError(
             f"Run {run.id} is no longer accepting signals: {error.message}"

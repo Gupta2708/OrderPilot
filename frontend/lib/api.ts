@@ -64,6 +64,7 @@ export const api = {
     wake_aggressiveness: string;
     default_wake_minutes: number;
     max_age_minutes: number;
+    require_approval_for: string[];
   }) =>
     request<Supervisor>("/api/supervisors", {
       method: "POST",
@@ -102,6 +103,15 @@ export const api = {
   pause: (runId: string) => request(`/api/runs/${runId}/pause`, { method: "POST" }),
 
   resume: (runId: string) => request(`/api/runs/${runId}/resume`, { method: "POST" }),
+
+  approveAction: (runId: string, approvalId: string) =>
+    request(`/api/runs/${runId}/approvals/${approvalId}/approve`, { method: "POST" }),
+
+  rejectAction: (runId: string, approvalId: string, reason: string) =>
+    request(`/api/runs/${runId}/approvals/${approvalId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
 
   terminate: (runId: string, reason: string) =>
     request(`/api/runs/${runId}/terminate`, {

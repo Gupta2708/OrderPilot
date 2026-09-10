@@ -47,11 +47,12 @@ class _FakeHandle:
     def __init__(self, client: FakeTemporalClient) -> None:
         self._client = client
 
-    async def signal(self, signal: Any, *args: Any) -> None:
+    async def signal(self, signal: Any, args: Any = None) -> None:
+        """Mirrors the SDK: a signal takes an explicit args list."""
         if self._client.fail_signals:
             raise run_service.WorkflowUnavailableError("workflow is gone")
         name = getattr(signal, "__name__", str(signal))
-        self._client.signals.append((name, args))
+        self._client.signals.append((name, tuple(args or ())))
 
     async def query(self, query: Any) -> dict[str, Any]:
         if self._client.state is None:
@@ -350,5 +351,71 @@ def test_runs_can_be_listed_and_filtered_by_status() -> None:
 
             filtered = await http.get("/api/runs", params={"status": "COMPLETED"})
             assert all(item["status"] == "COMPLETED" for item in filtered.json())
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------- approvals
+
+
+def test_supervisor_defaults_to_requiring_approval_for_customer_messages() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            created = await _make_supervisor(http)
+            assert created["config"]["require_approval_for"] == ["message_customer"]
+
+    asyncio.run(scenario())
+
+
+def test_approval_policy_rejects_unknown_actions() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            response = await http.post(
+                "/api/supervisors",
+                json={
+                    "name": "Bad policy",
+                    "base_instruction": "x",
+                    "require_approval_for": ["launch_missiles"],
+                },
+            )
+            assert response.status_code == 422
+
+    asyncio.run(scenario())
+
+
+def test_approve_and_reject_map_to_signals() -> None:
+    async def scenario() -> None:
+        async for http, temporal in _client(FakeTemporalClient()):
+            supervisor = await _make_supervisor(http)
+            run = await _make_run(http, supervisor["id"])
+            approval_id = str(uuid.uuid4())
+
+            approved = await http.post(f"/api/runs/{run['id']}/approvals/{approval_id}/approve")
+            assert approved.status_code == 202
+
+            rejected = await http.post(
+                f"/api/runs/{run['id']}/approvals/{approval_id}/reject",
+                json={"reason": "Too early to contact the customer"},
+            )
+            assert rejected.status_code == 202
+
+            sent = [name for name, _args in temporal.signals]
+            assert sent == ["approve_action", "reject_action"]
+            # The rejection carries both the approval id and the reason.
+            assert temporal.signals[1][1] == (
+                approval_id,
+                "Too early to contact the customer",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_approval_on_a_finished_workflow_returns_409() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient(fail_signals=True)):
+            supervisor = await _make_supervisor(http)
+            run = await _make_run(http, supervisor["id"])
+            response = await http.post(f"/api/runs/{run['id']}/approvals/{uuid.uuid4()}/approve")
+            assert response.status_code == 409
 
     asyncio.run(scenario())

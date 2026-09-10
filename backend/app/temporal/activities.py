@@ -21,6 +21,8 @@ from app.agent.provider import build_provider, deterministic_fallback
 from app.agent.schema import AgentDecisionModel, normalize
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
+from app.domain.events import OrderEvent
+from app.domain.wake_policy import Severity, WakeAggressiveness, evaluate_wake, meets_threshold
 from app.repository import save_run_snapshot
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,71 @@ async def make_decision(request: DecisionRequest) -> DecisionResponse:
     )
 
 
+@dataclass
+class ClassifyRequest:
+    event: dict[str, Any] = field(default_factory=dict)
+    order_state: dict[str, Any] = field(default_factory=dict)
+    wake_guidance: list[str] = field(default_factory=list)
+    aggressiveness: str = "BALANCED"
+
+
+@dataclass
+class ClassifyResponse:
+    wake_now: bool
+    severity: str
+    category: str
+    reason: str
+    rule: str
+
+
+@activity.defn
+async def classify_event(request: ClassifyRequest) -> ClassifyResponse:
+    """Level B: judge one ambiguous event.
+
+    Only called when the deterministic table defers. Any failure falls back to
+    the deterministic evaluation, so triage never depends on the model being up.
+    """
+    settings = get_settings()
+    provider = build_provider(
+        provider_name=settings.llm_provider,
+        model=settings.anthropic_model,
+        api_key=settings.anthropic_api_key,
+    )
+    event = OrderEvent(
+        event_id=str(request.event.get("event_id", "")),
+        type=str(request.event.get("type", "")),
+        payload=dict(request.event.get("payload", {})),
+    )
+    try:
+        aggressiveness = WakeAggressiveness(request.aggressiveness)
+    except ValueError:
+        aggressiveness = WakeAggressiveness.BALANCED
+
+    try:
+        result = await provider.classify(request.event, request.order_state, request.wake_guidance)
+        severity = Severity(result.severity)
+        # Sensitivity still governs: the classifier judges severity, the
+        # supervisor's configuration decides whether that severity wakes it.
+        wake_now = result.wake_now and meets_threshold(severity, aggressiveness)
+        return ClassifyResponse(
+            wake_now=wake_now,
+            severity=str(severity),
+            category=result.category,
+            reason=result.reason,
+            rule=f"ai_classifier:{provider.name}",
+        )
+    except Exception as error:  # noqa: BLE001 - any provider failure degrades safely
+        logger.warning("classifier failed (%s); using deterministic rules", type(error).__name__)
+        fallback = evaluate_wake(event, aggressiveness)
+        return ClassifyResponse(
+            wake_now=fallback.wake_now,
+            severity=str(fallback.severity),
+            category=fallback.category,
+            reason=fallback.reason,
+            rule="classifier_fallback_deterministic",
+        )
+
+
 @activity.defn
 async def run_business_action(request: ActionRequest) -> dict[str, Any]:
     """Execute one simulated business action and return a structured result."""
@@ -294,6 +361,7 @@ async def persist_snapshot(request: SnapshotRequest) -> int:
 
 ALL_ACTIVITIES: list[Callable[..., Any]] = [
     make_decision,
+    classify_event,
     run_business_action,
     compact_run_memory,
     finalize_run,

@@ -8,6 +8,7 @@ from app import repository
 from app.api.deps import SessionDep, TemporalDep
 from app.api.schemas import (
     ActivityResponse,
+    ApprovalDecision,
     ControlResponse,
     EventAccepted,
     EventCreate,
@@ -182,6 +183,44 @@ async def resume_run(
     except run_service.WorkflowUnavailableError as error:
         raise _unavailable(error) from error
     return ControlResponse(run_id=run.id, status="RESUMING")
+
+
+@router.post(
+    "/{run_id}/approvals/{approval_id}/approve",
+    response_model=ControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def approve_action(
+    run_id: uuid.UUID, approval_id: str, session: SessionDep, client: TemporalDep
+) -> ControlResponse:
+    """Release a pending sensitive action for execution."""
+    run = await _load_run(session, run_id)
+    try:
+        await run_service.approve_action(client, run, approval_id)
+    except run_service.WorkflowUnavailableError as error:
+        raise _unavailable(error) from error
+    return ControlResponse(run_id=run.id, status="APPROVING")
+
+
+@router.post(
+    "/{run_id}/approvals/{approval_id}/reject",
+    response_model=ControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reject_action(
+    run_id: uuid.UUID,
+    approval_id: str,
+    payload: ApprovalDecision,
+    session: SessionDep,
+    client: TemporalDep,
+) -> ControlResponse:
+    """Discard a pending sensitive action. It is never executed."""
+    run = await _load_run(session, run_id)
+    try:
+        await run_service.reject_action(client, run, approval_id, payload.reason)
+    except run_service.WorkflowUnavailableError as error:
+        raise _unavailable(error) from error
+    return ControlResponse(run_id=run.id, status="REJECTING")
 
 
 @router.post(
