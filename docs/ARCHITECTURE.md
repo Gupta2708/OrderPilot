@@ -12,10 +12,9 @@ FastAPI control plane --------> PostgreSQL product records
 Temporal client -> Temporal service -> Python worker
                                           |
                                   Workflow / Activities
-                                  (later stages)
 ```
 
-Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 adds persistence and the FastAPI control plane, completing the P0 backend.
+Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 added persistence and the FastAPI control plane. Stage 4 adds the operations UI, completing P0.
 
 Activities contain LLM inference, business actions, memory compaction, final-summary generation, and database writes. Network and database operations stay outside replayed workflow code; the workflow performs no I/O at all. PostgreSQL holds the product-facing record — runs, unified timeline, memory, decisions, final outputs — while Temporal owns durable execution history. The two are deliberately separate: Temporal is the execution truth, Postgres is the product truth.
 
@@ -92,7 +91,7 @@ Lifecycle authority is unchanged from Stage 1 and is tested explicitly: a provid
 ## Stage 3 control plane and persistence
 
 ```text
-          Next.js (Stage 4)
+          Next.js operations UI
                  |
                  v
        FastAPI control plane
@@ -114,6 +113,20 @@ Each row carries a per-run sequence number under a unique `(run_id, seq)` constr
 `GET /api/runs/{id}/state` prefers a live Query to the workflow and falls back to the persisted snapshot when the workflow has closed or Temporal is unreachable, labelling which source answered. `GET /api/runs/{id}` always answers from Postgres, so the timeline and final output remain available long after the workflow has completed and aged out of Temporal.
 
 Layering keeps HTTP thin. `app/repository.py` owns database access, `app/services/runs.py` owns the mapping from product operations to Temporal operations, and `app/api/` contains only routing, validation, and error translation. Business logic is therefore testable without HTTP handlers, which is how the API suite runs against a real database with a faked Temporal client, while `tests/test_end_to_end.py` exercises the real thing.
+
+## Stage 4 user interface
+
+The UI is a thin client. It holds no business logic and no lifecycle rules: it renders what the API reports and turns operator intent into API calls. Everything it shows already exists in the workflow or the database, which is why the same story can be told through `curl` without it.
+
+Screens map onto the domain rather than onto the API: a dashboard bucketing runs by what they are doing, supervisor configuration, a start-run flow, and the Run Control Room. The control room is the point of the product, so it puts the durable-execution story on one screen — current status, the countdown to the next durable wake, structured order state, compact memory, the decision the agent made, the wake decision explaining why the agent was or was not consulted, the unified timeline, and the actions actually executed.
+
+Two API reads back it. `GET /api/runs/{id}` supplies the persisted record, including the timeline and final output, and remains available after the workflow closes. `GET /api/runs/{id}/state` supplies live workflow state and labels its source, so the screen shows whether it is reading the workflow or the database. Where both carry a field, live state wins and the persisted record is the fallback.
+
+The client polls every two seconds rather than opening a stream. Runs advance on their own — a timer fires, an event arrives — so the screen has to change without user action, and at POC scale against a local API, polling is the smaller, more debuggable choice. One `usePolling` hook owns that behaviour so no screen re-implements it.
+
+The event simulator exists to make the wake policy visible. Injecting `payment_confirmed` updates the order state while the wake card explains that the main agent was deliberately not consulted; injecting `shipment_delayed` wakes it and produces an escalation. That contrast is the clearest demonstration that Temporal, not the model, owns the loop. Scenario presets advance one step at a time so each wake decision can be read before the next event lands, and the injector deliberately offers an unrecognised event type so unknown-event escalation can be shown.
+
+Controls are asynchronous and the UI says so. Pause, resume, terminate, events, and instructions are Signals; the API returns 202 and the workflow applies them on its next step, so the screen reports the request as accepted and lets the next poll show the effect rather than faking an immediate state change. Chain-of-thought is never displayed — only the stored reason summary.
 
 ## Local deployment
 

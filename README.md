@@ -2,7 +2,7 @@
 
 Durable AI order supervisor for the original Order Supervisor PDF assignment. The PDF is the requirements source; the existing staged prompt is preserved but is not an additional requirements source.
 
-Implemented through Stage 3: Next.js/Tailwind landing page, PostgreSQL schema/migrations, local Temporal configuration, `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules — the agent runtime with a Pydantic-validated decision contract, a Claude provider and a deterministic mock, the five business actions behind an allow-list, and compact rolling memory — plus the full P0 backend: runs, unified activity history, memory, decisions, and final outputs persisted to PostgreSQL and exposed over a FastAPI control plane. The whole system can now be exercised without a frontend. There is no UI yet. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
+Implemented through Stage 4, which completes P0: `OrderSupervisorWorkflow` — one durable workflow per order with Signals, Queries, durable timers, pause/resume/terminate, and workflow-owned terminal rules — the agent runtime with a Pydantic-validated decision contract, a Claude provider and a deterministic mock, the five business actions behind an allow-list, and compact rolling memory — the FastAPI control plane with everything persisted to PostgreSQL — and the operations UI: dashboard, supervisor configuration, start-run flow, Run Control Room, event simulator with scenario presets, and the final output. See [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 **No API key is required.** The default `LLM_PROVIDER=mock` runs a deterministic agent, so the whole system can be demonstrated offline.
 
@@ -167,7 +167,7 @@ Error mapping: 404 for an unknown supervisor or run, 409 for a duplicate order o
 
 The workflow persists its own progress: it buffers timeline rows and writes them, with current run state, through a persistence Activity. Rows carry a per-run sequence number with a unique constraint, so a retried write cannot duplicate history.
 
-**Both processes are needed for a working system.** The API starts workflows; the worker executes them. With the worker stopped, runs are created but never progress.
+**All three processes are needed for a working system.** The API starts workflows, the worker executes them, and the frontend drives the API. With the worker stopped, runs are created but never progress.
 
 Running the backend end to end:
 
@@ -178,4 +178,20 @@ uv run --locked python -m app.temporal.worker      # terminal 1
 uv run --locked uvicorn app.main:app --port 8000   # terminal 2
 ```
 
-See [architecture](docs/ARCHITECTURE.md). Stage 4 adds the product UI and event simulator.
+## Using the app (Stage 4)
+
+Open http://127.0.0.1:3000 with all three processes running.
+
+1. **Supervisors** — create a supervisor: its instruction, which of the five actions it may take, how eagerly it wakes, its review interval, and its maximum run age.
+2. **Start run** — give an order ID and some context, pick a supervisor, and optionally add an instruction that applies to this run only.
+3. **Run Control Room** — the main screen. It shows the live workflow status, a countdown to the next wake, structured order state, compact memory, the latest decision and the wake decision behind it, the unified timeline, action history, run instructions, the event simulator, and pause/resume/terminate. When the run ends it shows the final summary, learnings, and recommendations.
+
+The **event simulator** drives an order forward one event at a time. It carries the four assignment scenarios — Happy Path, Payment Trouble, Delivery Crisis, Refund Risk — and can inject any single event, including an unrecognised type so unknown-event handling can be demonstrated.
+
+The clearest thing to demonstrate is the difference between events: `payment_confirmed` updates the order state and the wake card explains that the agent was deliberately *not* woken, while `shipment_delayed` wakes it immediately and produces an escalation. Adding the instruction "If shipment is delayed, escalate immediately." before injecting the delay shows live instructions changing the next decision.
+
+The UI polls the API every two seconds. Runs progress on their own, so state changes without a refresh.
+
+`NEXT_PUBLIC_API_BASE_URL` overrides the API location; see `frontend/.env.example`. The default works with the setup above.
+
+See [architecture](docs/ARCHITECTURE.md). Stage 5 adds the AI wake classifier, the human approval gate, and the worker-restart durability demo.
