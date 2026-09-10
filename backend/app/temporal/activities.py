@@ -18,7 +18,7 @@ from temporalio import activity
 from app.agent.execution import ActionOutcome, compact_memory, execute_action
 from app.agent.prompt import AgentContext
 from app.agent.provider import build_provider, deterministic_fallback
-from app.agent.schema import AgentDecisionModel, normalize
+from app.agent.schema import AgentDecisionModel, clean_guidance, normalize
 from app.config import get_settings
 from app.db import create_engine, create_session_factory
 from app.domain.events import OrderEvent
@@ -51,6 +51,7 @@ class DecisionRequest:
     recent_activity: list[dict[str, Any]] = field(default_factory=list)
     allowed_actions: list[str] = field(default_factory=list)
     default_wake_minutes: int = 60
+    wake_guidance: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -67,6 +68,7 @@ class DecisionResponse:
     provider: str
     rejected_actions: list[str] = field(default_factory=list)
     fallback_used: bool = False
+    wake_guidance: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,6 +117,7 @@ def _context_from(request: DecisionRequest) -> AgentContext:
         recent_activity=list(request.recent_activity),
         allowed_actions=list(request.allowed_actions),
         default_wake_minutes=request.default_wake_minutes,
+        wake_guidance=list(request.wake_guidance),
     )
 
 
@@ -167,6 +170,7 @@ async def make_decision(request: DecisionRequest) -> DecisionResponse:
         provider="fallback" if fallback_used else provider.name,
         rejected_actions=rejected,
         fallback_used=fallback_used,
+        wake_guidance=clean_guidance(model_output.wake_guidance),
     )
 
 
@@ -317,6 +321,7 @@ class SnapshotRequest:
     next_wake_at: str | None = None
     last_wake_at: str | None = None
     stats: dict[str, int] = field(default_factory=dict)
+    wake_guidance: list[str] = field(default_factory=list)
     final_output: dict[str, Any] | None = None
     completed_at: str | None = None
     activities: list[dict[str, Any]] = field(default_factory=list)
@@ -352,6 +357,7 @@ async def persist_snapshot(request: SnapshotRequest) -> int:
             next_wake_at=_parse_iso(request.next_wake_at),
             last_wake_at=_parse_iso(request.last_wake_at),
             stats=request.stats,
+            wake_guidance=request.wake_guidance,
             final_output=request.final_output,
             completed_at=_parse_iso(request.completed_at),
             activities=request.activities,

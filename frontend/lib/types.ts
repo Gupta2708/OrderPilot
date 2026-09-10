@@ -16,6 +16,7 @@ export interface Supervisor {
     default_wake_minutes?: number;
     max_age_minutes?: number;
     require_approval_for?: string[];
+    continue_as_new_after_events?: number;
   };
   created_at: string;
 }
@@ -87,6 +88,7 @@ export interface OrderState {
 
 export interface RunDetail extends RunSummary {
   order_state: OrderState;
+  wake_guidance: string[];
   memory_summary: string;
   run_instructions: string[];
   latest_decision: AgentDecision | null;
@@ -99,6 +101,37 @@ export interface PendingApproval {
   tool: string;
   arguments: Record<string, unknown>;
   requested_at: string | null;
+}
+
+export interface SupervisorTemplate {
+  key: string;
+  name: string;
+  description: string;
+  base_instruction: string;
+  allowed_actions: string[];
+  wake_aggressiveness: string;
+  default_wake_minutes: number;
+  max_age_minutes: number;
+  require_approval_for: string[];
+}
+
+export interface RunAnalytics {
+  run_id: string;
+  order_id: string;
+  status: string;
+  events_received: number;
+  agent_wakeups: number;
+  no_wake_events: number;
+  classifier_calls: number;
+  scheduled_reviews: number;
+  actions_executed: number;
+  customer_actions: number;
+  approvals_granted: number;
+  approvals_denied: number;
+  continuations: number;
+  duration_seconds: number;
+  wake_rate: number;
+  actions_per_wake: number;
 }
 
 export interface RunState {
@@ -116,6 +149,7 @@ export interface RunState {
   latest_wake_decision: WakeDecision | null;
   executed_actions: Record<string, unknown>[];
   pending_approvals: PendingApproval[];
+  wake_guidance: string[];
   next_wake_at: string | null;
   last_wake_at: string | null;
   pending_events: number;

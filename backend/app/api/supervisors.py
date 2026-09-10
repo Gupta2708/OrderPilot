@@ -6,7 +6,12 @@ from fastapi import APIRouter, HTTPException, status
 
 from app import repository
 from app.api.deps import SessionDep
-from app.api.schemas import SupervisorCreate, SupervisorResponse
+from app.api.schemas import (
+    SupervisorCreate,
+    SupervisorResponse,
+    SupervisorTemplateResponse,
+)
+from app.domain.templates import TEMPLATES
 
 router = APIRouter(prefix="/api/supervisors", tags=["supervisors"])
 
@@ -23,9 +28,16 @@ async def create_supervisor(payload: SupervisorCreate, session: SessionDep) -> S
             "default_wake_minutes": payload.default_wake_minutes,
             "max_age_minutes": payload.max_age_minutes,
             "require_approval_for": payload.require_approval_for,
+            "continue_as_new_after_events": payload.continue_as_new_after_events,
         },
     )
     return SupervisorResponse.model_validate(supervisor)
+
+
+@router.get("/templates", response_model=list[SupervisorTemplateResponse])
+async def list_templates() -> list[SupervisorTemplateResponse]:
+    """Ready-made policies to create a supervisor from."""
+    return [SupervisorTemplateResponse(**template.as_dict()) for template in TEMPLATES]
 
 
 @router.get("", response_model=list[SupervisorResponse])

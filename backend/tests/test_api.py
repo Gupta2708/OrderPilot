@@ -419,3 +419,55 @@ def test_approval_on_a_finished_workflow_returns_409() -> None:
             assert response.status_code == 409
 
     asyncio.run(scenario())
+
+
+# ------------------------------------------------- templates and analytics
+
+
+def test_supervisor_templates_are_offered() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            response = await http.get("/api/supervisors/templates")
+            assert response.status_code == 200
+            keys = {item["key"] for item in response.json()}
+            assert keys == {"standard", "vip", "cost_conscious"}
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_stores_the_continue_as_new_threshold() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            created = await _make_supervisor(http, continue_as_new_after_events=25)
+            assert created["config"]["continue_as_new_after_events"] == 25
+
+    asyncio.run(scenario())
+
+
+def test_run_analytics_reports_counters_and_ratios() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            supervisor = await _make_supervisor(http)
+            run = await _make_run(http, supervisor["id"])
+
+            response = await http.get(f"/api/runs/{run['id']}/analytics")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["run_id"] == run["id"]
+            assert body["order_id"] == run["order_id"]
+            # A brand new run has no counters yet, and no division by zero.
+            assert body["events_received"] == 0
+            assert body["wake_rate"] == 0.0
+            assert body["actions_per_wake"] == 0.0
+            assert body["duration_seconds"] >= 0
+
+    asyncio.run(scenario())
+
+
+def test_analytics_for_unknown_run_returns_404() -> None:
+    async def scenario() -> None:
+        async for http, _temporal in _client(FakeTemporalClient()):
+            response = await http.get(f"/api/runs/{uuid.uuid4()}/analytics")
+            assert response.status_code == 404
+
+    asyncio.run(scenario())

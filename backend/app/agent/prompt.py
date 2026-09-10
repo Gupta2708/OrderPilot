@@ -56,6 +56,7 @@ class AgentContext:
     recent_activity: list[dict[str, Any]] = field(default_factory=list)
     allowed_actions: list[str] = field(default_factory=list)
     default_wake_minutes: int = 60
+    wake_guidance: list[str] = field(default_factory=list)
 
 
 def build_classifier_prompt(
@@ -96,6 +97,10 @@ def build_user_prompt(context: AgentContext) -> str:
 
     if context.memory_summary:
         sections += ["", "Memory so far:", context.memory_summary]
+
+    if context.wake_guidance:
+        sections += ["", "Standing wake guidance you set earlier:"]
+        sections += [f"- {line}" for line in context.wake_guidance]
 
     if context.triggering_event is not None:
         sections += [

@@ -1,4 +1,11 @@
-import type { RunDetail, RunState, RunSummary, Supervisor } from "./types";
+import type {
+  RunAnalytics,
+  RunDetail,
+  RunState,
+  RunSummary,
+  Supervisor,
+  SupervisorTemplate,
+} from "./types";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://127.0.0.1:8000";
@@ -57,6 +64,10 @@ async function readError(response: Response): Promise<string> {
 export const api = {
   listSupervisors: () => request<Supervisor[]>("/api/supervisors"),
 
+  listTemplates: () => request<SupervisorTemplate[]>("/api/supervisors/templates"),
+
+  getRunAnalytics: (runId: string) => request<RunAnalytics>(`/api/runs/${runId}/analytics`),
+
   createSupervisor: (payload: {
     name: string;
     base_instruction: string;
@@ -65,6 +76,7 @@ export const api = {
     default_wake_minutes: number;
     max_age_minutes: number;
     require_approval_for: string[];
+    continue_as_new_after_events: number;
   }) =>
     request<Supervisor>("/api/supervisors", {
       method: "POST",

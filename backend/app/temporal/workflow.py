@@ -7,6 +7,7 @@ else: the agent may recommend completion, but only the rules in this file end a
 run.
 """
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -46,9 +47,10 @@ with workflow.unsafe.imports_passed_through():
         persist_snapshot,
         run_business_action,
     )
-    from app.temporal.types import RunParams, RunResult
+    from app.temporal.types import CarriedState, RunParams, RunResult
 
 MAX_TIMELINE_ENTRIES = 500
+CARRIED_EVENT_IDS = 50
 RECENT_ACTIVITY_WINDOW = 8
 
 DECISION_RETRY = RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1))
@@ -85,6 +87,8 @@ class ActivityType:
     RUN_TERMINATED = "RUN_TERMINATED"
     RUN_COMPLETED = "RUN_COMPLETED"
     FINAL_OUTPUT = "FINAL_OUTPUT"
+    WAKE_GUIDANCE_UPDATED = "WAKE_GUIDANCE_UPDATED"
+    RUN_CONTINUED = "RUN_CONTINUED"
 
 
 @workflow.defn(name="OrderSupervisorWorkflow")
@@ -95,7 +99,8 @@ class OrderSupervisorWorkflow:
         self._status: RunStatus = RunStatus.PENDING
         self._order_state: dict[str, Any] = initial_order_state()
         self._pending_events: list[OrderEvent] = []
-        self._seen_event_ids: set[str] = set()
+        # Insertion-ordered so the carried tail is genuinely the newest ids.
+        self._seen_event_ids: dict[str, None] = {}
         self._instructions: list[str] = []
         self._timeline: list[dict[str, Any]] = []
         self._unpersisted: list[dict[str, Any]] = []
@@ -106,6 +111,9 @@ class OrderSupervisorWorkflow:
         # Set when a persistence write fails, so unflushed rows stop re-waking
         # the loop; they are retried at the next natural flush instead.
         self._persist_blocked = False
+        self._wake_guidance: list[str] = []
+        self._continuations = 0
+        self._events_this_run = 0
         self._latest_decision: dict[str, Any] | None = None
         self._latest_wake: dict[str, Any] | None = None
         self._next_wake_at: datetime | None = None
@@ -129,6 +137,8 @@ class OrderSupervisorWorkflow:
             "approvals_granted": 0,
             "approvals_denied": 0,
             "persist_failures": 0,
+            "customer_actions": 0,
+            "continuations": 0,
         }
 
     # ------------------------------------------------------------------ run
@@ -137,7 +147,10 @@ class OrderSupervisorWorkflow:
     async def run(self, params: RunParams) -> RunResult:
         self._params = params
         self._started_at = workflow.now()
-        self._instructions.extend(params.initial_instructions)
+        if params.carried is not None:
+            self._restore(params.carried)
+        else:
+            self._instructions.extend(params.initial_instructions)
         self._record(
             ActivityType.RUN_STARTED,
             {
@@ -148,8 +161,10 @@ class OrderSupervisorWorkflow:
             },
         )
 
-        # Wake 1 of 3: workflow start.
-        await self._wake("WORKFLOW_START", None, None)
+        if params.carried is None:
+            # Wake 1 of 3: workflow start. A continuation is the same logical
+            # run, so it must not re-run the start wake.
+            await self._wake("WORKFLOW_START", None, None)
         await self._persist()
 
         while self._terminal_reason is None:
@@ -197,6 +212,9 @@ class OrderSupervisorWorkflow:
             await self._drain_pending_events()
             await self._persist()
 
+            if self._should_continue():
+                await self._continue_as_new()
+
         return await self._finalize()
 
     # -------------------------------------------------------------- signals
@@ -212,7 +230,7 @@ class OrderSupervisorWorkflow:
         if event.event_id in self._seen_event_ids:
             self._record(ActivityType.EVENT_DUPLICATE_IGNORED, {"event_id": event.event_id})
             return
-        self._seen_event_ids.add(event.event_id)
+        self._seen_event_ids[event.event_id] = None
         self._pending_events.append(event)
 
     @workflow.signal(name="add_instruction")
@@ -289,6 +307,7 @@ class OrderSupervisorWorkflow:
             "latest_wake_decision": self._latest_wake,
             "executed_actions": list(self._executed_actions),
             "pending_approvals": list(self._pending_approvals),
+            "wake_guidance": list(self._wake_guidance),
             "next_wake_at": self._iso(self._next_wake_at),
             "last_wake_at": self._iso(self._last_wake_at),
             "pending_events": len(self._pending_events),
@@ -332,6 +351,7 @@ class OrderSupervisorWorkflow:
         while self._pending_events and not self._terminate_requested and not self._paused:
             event = self._pending_events.pop(0)
             self._stats["events_received"] += 1
+            self._events_this_run += 1
             self._record(
                 ActivityType.EVENT_RECEIVED,
                 {"event_id": event.event_id, "type": event.type, "payload": event.payload},
@@ -373,7 +393,7 @@ class OrderSupervisorWorkflow:
                         "payload": event.payload,
                     },
                     order_state=self._order_state,
-                    wake_guidance=[],
+                    wake_guidance=list(self._wake_guidance),
                     aggressiveness=str(self._aggressiveness()),
                 ),
                 start_to_close_timeout=CLASSIFY_TIMEOUT,
@@ -416,6 +436,7 @@ class OrderSupervisorWorkflow:
             recent_activity=self._recent_activity(),
             allowed_actions=list(self._params.allowed_actions),
             default_wake_minutes=self._params.default_wake_minutes,
+            wake_guidance=list(self._wake_guidance),
         )
         decision: DecisionResponse = await workflow.execute_activity(
             make_decision,
@@ -438,6 +459,12 @@ class OrderSupervisorWorkflow:
             "trigger": trigger,
         }
         self._record(ActivityType.AGENT_DECISION, self._latest_decision)
+
+        if decision.wake_guidance and decision.wake_guidance != self._wake_guidance:
+            # Advisory only: guidance informs the classifier's judgement but can
+            # never widen what the supervisor's configuration permits.
+            self._wake_guidance = list(decision.wake_guidance)
+            self._record(ActivityType.WAKE_GUIDANCE_UPDATED, {"wake_guidance": self._wake_guidance})
 
         for tool in decision.rejected_actions:
             self._stats["actions_rejected"] += 1
@@ -480,6 +507,8 @@ class OrderSupervisorWorkflow:
         )
         if result.get("ok"):
             self._stats["actions_executed"] += 1
+            if tool == "message_customer":
+                self._stats["customer_actions"] += 1
             self._executed_actions.append(result)
             self._record(ActivityType.ACTION_EXECUTED, result)
         else:
@@ -576,6 +605,102 @@ class OrderSupervisorWorkflow:
         )
         return result
 
+    def _restore(self, carried: CarriedState) -> None:
+        """Rebuild current state after a Continue-As-New.
+
+        Only current state is restored; the timeline is not, because it already
+        lives in PostgreSQL and carrying it would defeat the point of resetting
+        workflow history.
+        """
+        self._order_state = dict(carried.order_state)
+        self._memory_summary = carried.memory_summary
+        self._instructions = list(carried.instructions)
+        self._wake_guidance = list(carried.wake_guidance)
+        self._stats = dict(carried.stats)
+        self._executed_actions = list(carried.executed_actions)
+        self._pending_approvals = list(carried.pending_approvals)
+        self._seen_event_ids = dict.fromkeys(carried.recent_event_ids)
+        self._latest_decision = carried.latest_decision
+        self._sequence = carried.sequence
+        self._continuations = carried.continuations
+        self._pending_events = [
+            OrderEvent(
+                event_id=str(raw.get("event_id", "")),
+                type=str(raw.get("type", "")),
+                payload=dict(raw.get("payload", {})),
+            )
+            for raw in carried.pending_events
+        ]
+        if carried.started_at:
+            try:
+                self._started_at = datetime.fromisoformat(carried.started_at)
+            except ValueError:
+                pass
+        self._status = RunStatus.SLEEPING
+
+    def _should_continue(self) -> bool:
+        """Continue-As-New only at a quiet, safe point."""
+        assert self._params is not None
+        threshold = self._params.continue_as_new_after_events
+        if threshold <= 0 or self._terminal_reason is not None:
+            return False
+        if self._events_this_run < threshold:
+            return False
+        # Never mid-flight: no queued work, nothing awaiting a human, not paused.
+        return not (
+            self._pending_events
+            or self._approved_queue
+            or self._pending_approvals
+            or self._paused
+            or self._terminate_requested
+        )
+
+    async def _continue_as_new(self) -> None:
+        """Reset workflow history while keeping the run logically identical."""
+        assert self._params is not None
+        self._continuations += 1
+        self._stats["continuations"] = self._continuations
+        self._record(
+            ActivityType.RUN_CONTINUED,
+            {
+                "continuation": self._continuations,
+                "events_handled": self._stats["events_received"],
+            },
+        )
+        await self._persist()
+
+        params = replace(self._params, carried=self._carried_state())
+        workflow.continue_as_new(params)
+
+    def _carried_state(self) -> CarriedState:
+        """Build the compact state that survives the boundary.
+
+        Pure, so the round trip with `_restore` can be tested directly. Getting
+        this wrong loses Signals silently, which is the worst possible failure.
+        """
+        return CarriedState(
+            order_state=self._order_state,
+            memory_summary=self._memory_summary,
+            instructions=list(self._instructions),
+            wake_guidance=list(self._wake_guidance),
+            stats=dict(self._stats),
+            executed_actions=list(self._executed_actions),
+            pending_approvals=list(self._pending_approvals),
+            # Anything that arrived during the persist await above must travel
+            # with the run; dropping it would lose a Signal silently.
+            pending_events=[
+                {"event_id": e.event_id, "type": e.type, "payload": e.payload}
+                for e in self._pending_events
+            ],
+            # Keep a bounded tail of the most recent ids so de-duplication
+            # survives the boundary without carrying the run's whole history.
+            recent_event_ids=list(self._seen_event_ids)[-CARRIED_EVENT_IDS:],
+            latest_decision=self._latest_decision,
+            started_at=self._iso(self._started_at),
+            sequence=self._sequence,
+            continuations=self._continuations,
+        )
+
     async def _persist(self, final_output: dict[str, Any] | None = None) -> None:
         """Write current run state and any new timeline rows to Postgres.
 
@@ -598,6 +723,7 @@ class OrderSupervisorWorkflow:
             next_wake_at=self._iso(self._next_wake_at),
             last_wake_at=self._iso(self._last_wake_at),
             stats=dict(self._stats),
+            wake_guidance=list(self._wake_guidance),
             final_output=final_output,
             completed_at=self._iso(completed_at),
             activities=pending,

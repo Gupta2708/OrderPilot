@@ -221,4 +221,22 @@ The workflow lives in Temporal, not in the worker process, so a worker restart l
 
 `tests/test_p1.py::test_run_survives_a_worker_restart_while_sleeping` automates exactly this against a real dev server, including the window where no worker exists at all.
 
-See [architecture](docs/ARCHITECTURE.md). Stage 6 adds run analytics, adaptive wake guidance, Continue-As-New, and supervisor templates.
+## Analytics, guidance, templates, and Continue-As-New (Stage 6)
+
+**Run analytics** — `GET /api/runs/{run_id}/analytics` reports events received, agent wake-ups, events handled without waking, classifier calls, scheduled reviews, actions executed, customer actions, approvals granted and rejected, continuations, and duration. Two derived numbers make the point of the system legible: *wake rate*, the share of events that actually needed the agent, and *actions per wake*, the work done per consultation. Both are shown in the Run Control Room.
+
+**Adaptive wake guidance** — the agent may return up to three short standing hints, for example "treat any further delay as critical". Guidance is bounded, de-duplicated, length-capped, persisted on the run, and fed to the classifier on later ambiguous events. It is strictly advisory: it informs triage but cannot widen the action allow-list or override the supervisor's configured wake sensitivity.
+
+**Supervisor templates** — `GET /api/supervisors/templates` offers three deliberately different policies, and the supervisor page loads one into the form so it can still be adjusted:
+
+| Template | Wake sensitivity | Review | Notes |
+| --- | --- | --- | --- |
+| Standard | BALANCED | 60m | Customer messages need approval |
+| VIP / High-Touch | HIGH | 20m | Trusted to contact the customer directly |
+| Cost-Conscious | LOW | 240m | Cannot message the customer at all |
+
+**Continue-As-New** — a long-lived order would grow Temporal history without bound, so a supervisor can be configured to continue after N events (`continue_as_new_after_events`; 0 disables it). Set it to 2–5 to watch it happen. The continuation carries only compact state — order state, memory, instructions, guidance, counters, executed actions, pending approvals, queued events, and a bounded tail of seen event ids — because the full timeline already lives in PostgreSQL. The run keeps its order ID, its run ID, and its workflow ID, so it stays one logical run; the UI shows a `RUN CONTINUED` entry and the continuation count.
+
+A continuation only happens at a quiet point: never mid-event, never while an approval is pending, never while paused, and never on a terminal run.
+
+See [architecture](docs/ARCHITECTURE.md). Stage 7 is final hardening, documentation, and submission readiness.

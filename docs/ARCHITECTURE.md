@@ -14,7 +14,7 @@ Temporal client -> Temporal service -> Python worker
                                   Workflow / Activities
 ```
 
-Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 added persistence and the FastAPI control plane. Stage 4 added the operations UI, completing P0. Stage 5 adds the P1 layer: a hybrid wake policy, a human approval gate, and a demonstrated durability story.
+Stage 0 implemented the application shells, typed configuration, database schema, and Temporal connection. Stage 1 added `OrderSupervisorWorkflow`: one durable workflow per order owning lifecycle, Signal handling, durable timers, and completion rules. Stage 2 added the agent runtime behind that lifecycle. Stage 3 added persistence and the FastAPI control plane. Stage 4 added the operations UI, completing P0. Stage 5 added the P1 layer: a hybrid wake policy, a human approval gate, and a demonstrated durability story. Stage 6 adds P2: analytics, adaptive wake guidance, Continue-As-New, and supervisor templates.
 
 Activities contain LLM inference, business actions, memory compaction, final-summary generation, and database writes. Network and database operations stay outside replayed workflow code; the workflow performs no I/O at all. PostgreSQL holds the product-facing record — runs, unified timeline, memory, decisions, final outputs — while Temporal owns durable execution history. The two are deliberately separate: Temporal is the execution truth, Postgres is the product truth.
 
@@ -178,6 +178,33 @@ tool in the supervisor's require_approval_for?
 The approval gate sits between deciding and executing, which is the only place it can be correct. The agent still proposes normally; the workflow holds the action, and human intent arrives as ordinary Signals like every other control. Approved actions are queued and executed by the run loop rather than inside the Signal handler, so execution stays on the deterministic path. A rejected action is recorded and dropped — there is no code path from a rejection to an execution.
 
 Durability needed no new mechanism, only a demonstration. Because state lives in Temporal rather than the worker, a run survives its worker disappearing entirely: Signals sent during the outage are held and delivered when a worker returns. The automated test leaves the task queue genuinely unattended, sends an event into that gap, and asserts the run resumes with its memory and history intact.
+
+## Stage 6 analytics, guidance, and Continue-As-New
+
+Analytics are derived, not stored twice. The workflow already maintains counters as it runs and persists them with each snapshot, so the analytics endpoint reads the run row and computes the two ratios worth reading — wake rate and actions per wake — rather than maintaining a separate aggregate that could drift. Wake rate deliberately counts only signal-driven wakes: the start wake and scheduled reviews are not responses to events, and including them would overstate how often the agent was actually needed.
+
+Adaptive guidance closes a loop that was previously one-way. The classifier could consume standing guidance from the beginning, but nothing produced any; now the agent may emit up to three short hints, which are cleaned, de-duplicated, length-capped, persisted, and supplied to later classifications. The boundary matters: guidance is advisory input to triage, never authority. It cannot add a tool to the allow-list, and it cannot lower the supervisor's wake threshold — those remain configuration, checked after the classifier has spoken.
+
+```text
+run reaches its event threshold at a quiet point
+     |
+     v
+record RUN_CONTINUED  ->  persist (timeline is safe in Postgres)
+     |
+     v
+carry compact state:
+  order state | memory | instructions | guidance | counters
+  executed actions | pending approvals | queued events | recent event ids
+     |
+     v
+workflow.continue_as_new(params)  ->  fresh history, same run identity
+```
+
+Continue-As-New keeps a long-lived order's Temporal history bounded. What it carries is deliberately small — current state, not history — because the timeline already lives in PostgreSQL, and carrying it would defeat the purpose. Run identity is preserved: same order ID, same run ID, same workflow ID, so the product record and the UI see one continuous run.
+
+Two details are what make it safe. First, a continuation only happens at a quiet point — no queued events, no approved actions waiting to execute, nothing pending a human, not paused, not terminal — because resetting history mid-decision would strand work. Second, the persist call inside the continuation awaits, which yields and lets Signal handlers run, so events can be queued in that exact window; they are carried across rather than dropped. That path is covered by a direct round-trip test of the carried state, because losing a Signal here would be silent, and silence is the worst failure mode this system can have.
+
+The seen-event-id tail is bounded and ordered by insertion, so de-duplication survives the boundary for recent events without carrying every id the run has ever seen.
 
 ## Local deployment
 

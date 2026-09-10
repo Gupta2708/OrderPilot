@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { titleCase } from "@/lib/format";
-import type { Supervisor } from "@/lib/types";
+import type { Supervisor, SupervisorTemplate } from "@/lib/types";
 import { usePolling } from "@/lib/use-polling";
 import { Button, Card, EmptyState, ErrorBanner } from "@/components/ui";
 
@@ -31,10 +31,17 @@ export default function SupervisorsPage() {
   const [aggressiveness, setAggressiveness] = useState("BALANCED");
   const [wakeMinutes, setWakeMinutes] = useState(60);
   const [maxAgeMinutes, setMaxAgeMinutes] = useState(7 * 24 * 60);
+  const [continueAfter, setContinueAfter] = useState(0);
+  const [templates, setTemplates] = useState<SupervisorTemplate[]>([]);
 
   const load = useCallback(async () => {
     try {
-      setSupervisors(await api.listSupervisors());
+      const [items, presets] = await Promise.all([
+        api.listSupervisors(),
+        api.listTemplates().catch(() => []),
+      ]);
+      setSupervisors(items);
+      setTemplates(presets);
       setError(null);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Could not load supervisors");
@@ -47,6 +54,17 @@ export default function SupervisorsPage() {
     setActions((current) =>
       current.includes(action) ? current.filter((item) => item !== action) : [...current, action],
     );
+  }
+
+  /** Load a preset into the form so it can still be adjusted before saving. */
+  function applyTemplate(template: SupervisorTemplate) {
+    setName(template.name);
+    setInstruction(template.base_instruction);
+    setActions(template.allowed_actions);
+    setApprovalActions(template.require_approval_for);
+    setAggressiveness(template.wake_aggressiveness);
+    setWakeMinutes(template.default_wake_minutes);
+    setMaxAgeMinutes(template.max_age_minutes);
   }
 
   function toggleApproval(action: string) {
@@ -68,6 +86,7 @@ export default function SupervisorsPage() {
         default_wake_minutes: wakeMinutes,
         max_age_minutes: maxAgeMinutes,
         require_approval_for: approvalActions,
+        continue_as_new_after_events: continueAfter,
       });
       await load();
     } catch (caught) {
@@ -88,6 +107,29 @@ export default function SupervisorsPage() {
       </div>
 
       <ErrorBanner message={error} />
+
+      {templates.length > 0 && (
+        <Card title="Start from a template" subtitle="Load a preset, then adjust it">
+          <div className="grid gap-3 sm:grid-cols-3">
+            {templates.map((template) => (
+              <button
+                key={template.key}
+                type="button"
+                onClick={() => applyTemplate(template)}
+                className="rounded-lg border border-slate-200 bg-white p-3 text-left transition hover:border-teal-500 hover:bg-teal-50/40"
+              >
+                <p className="text-sm font-semibold text-slate-900">{template.name}</p>
+                <p className="mt-1 text-xs leading-5 text-slate-600">{template.description}</p>
+                <p className="mt-2 text-[11px] text-slate-500">
+                  {template.wake_aggressiveness} · review every {template.default_wake_minutes}m ·{" "}
+                  {template.allowed_actions.length} actions
+                  {template.require_approval_for.length > 0 ? " · approval required" : ""}
+                </p>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card title="New supervisor">
@@ -205,6 +247,24 @@ export default function SupervisorsPage() {
                   className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-teal-600 focus:outline-none"
                 />
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="can" className="block text-xs font-medium text-slate-700">
+                Continue-As-New after N events
+              </label>
+              <input
+                id="can"
+                type="number"
+                min={0}
+                value={continueAfter}
+                onChange={(event) => setContinueAfter(Number(event.target.value))}
+                className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-teal-600 focus:outline-none sm:w-40"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                Resets Temporal history so a long-lived run stays bounded. 0 disables it; set it
+                low (2–5) to watch it happen.
+              </p>
             </div>
 
             <Button type="submit" disabled={saving || actions.length === 0}>

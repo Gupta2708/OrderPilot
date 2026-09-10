@@ -126,6 +126,7 @@ async def save_run_snapshot(
     next_wake_at: datetime | None,
     last_wake_at: datetime | None,
     stats: dict[str, int],
+    wake_guidance: list[str],
     final_output: dict[str, Any] | None,
     completed_at: datetime | None,
     activities: list[dict[str, Any]],
@@ -147,6 +148,7 @@ async def save_run_snapshot(
     run.next_wake_at = next_wake_at
     run.last_wake_at = last_wake_at
     run.stats = dict(stats)
+    run.wake_guidance = list(wake_guidance)
     if final_output is not None:
         run.final_output = final_output
     if completed_at is not None:

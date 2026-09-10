@@ -73,6 +73,7 @@ async def start_run(session: AsyncSession, client: Client, request: StartRunRequ
         initial_instructions=list(request.initial_instructions),
         order_context=dict(request.order_context),
         require_approval_for=list(config.get("require_approval_for", [])),
+        continue_as_new_after_events=int(config.get("continue_as_new_after_events", 0)),
     )
 
     try:

@@ -46,6 +46,9 @@ class Run(Base):
     next_wake_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_wake_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stats: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=text("'{}'"))
+    wake_guidance: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'")
+    )
     latest_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     final_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

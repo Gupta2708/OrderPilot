@@ -7,6 +7,7 @@ import type {
   FinalOutput,
   OrderState,
   PendingApproval,
+  RunAnalytics,
   WakeDecision,
 } from "@/lib/types";
 import { Button, Card, EmptyState, SeverityBadge } from "@/components/ui";
@@ -152,6 +153,8 @@ const TIMELINE_TONE: Record<string, string> = {
   ACTION_PENDING_APPROVAL: "bg-amber-400",
   ACTION_APPROVED: "bg-emerald-500",
   ACTION_DENIED: "bg-rose-500",
+  WAKE_GUIDANCE_UPDATED: "bg-indigo-400",
+  RUN_CONTINUED: "bg-violet-500",
   EVENT_RECEIVED: "bg-sky-500",
   EVENT_REJECTED: "bg-rose-400",
   EVENT_DUPLICATE_IGNORED: "bg-slate-300",
@@ -355,6 +358,77 @@ export function ApprovalsCard({
           </li>
         ))}
       </ul>
+    </Card>
+  );
+}
+
+export function GuidanceCard({ guidance }: { guidance: string[] }) {
+  if (guidance.length === 0) return null;
+  return (
+    <Card
+      title="Adaptive wake guidance"
+      subtitle="Set by the agent; advises triage, never widens permissions"
+    >
+      <ul className="space-y-1.5">
+        {guidance.map((line, index) => (
+          <li key={index} className="text-sm leading-6 text-slate-700">
+            • {line}
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+export function AnalyticsCard({ analytics }: { analytics: RunAnalytics | null }) {
+  if (!analytics) return null;
+  const rows: [string, string | number][] = [
+    ["Events received", analytics.events_received],
+    ["Agent wake-ups", analytics.agent_wakeups],
+    ["Handled without waking", analytics.no_wake_events],
+    ["Classifier calls", analytics.classifier_calls],
+    ["Scheduled reviews", analytics.scheduled_reviews],
+    ["Actions executed", analytics.actions_executed],
+    ["Customer actions", analytics.customer_actions],
+    ["Approvals granted", analytics.approvals_granted],
+    ["Approvals rejected", analytics.approvals_denied],
+    ["Continuations", analytics.continuations],
+    ["Run duration", formatDuration(analytics.duration_seconds)],
+  ];
+  return (
+    <Card title="Run analytics" subtitle="What this supervisor actually did">
+      <dl className="space-y-1.5">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-3 text-sm">
+            <dt className="text-slate-500">{label}</dt>
+            <dd className="font-medium tabular-nums text-slate-800">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-slate-500">Wake rate</p>
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {Math.round(analytics.wake_rate * 100)}%
+          </p>
+          <p className="text-[11px] text-slate-500">of events needed the agent</p>
+        </div>
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-slate-500">Actions / wake</p>
+          <p className="text-lg font-semibold tabular-nums text-slate-900">
+            {analytics.actions_per_wake}
+          </p>
+          <p className="text-[11px] text-slate-500">work done per consultation</p>
+        </div>
+      </div>
     </Card>
   );
 }

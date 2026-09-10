@@ -23,6 +23,8 @@ class SupervisorCreate(BaseModel):
     require_approval_for: list[str] = Field(
         default_factory=lambda: [str(BusinessAction.MESSAGE_CUSTOMER)]
     )
+    # 0 disables Continue-As-New; keep it low in development to exercise it.
+    continue_as_new_after_events: int = Field(default=0, ge=0, le=10_000)
 
     @field_validator("allowed_actions", "require_approval_for")
     @classmethod
@@ -80,6 +82,7 @@ class ActivityResponse(BaseModel):
 
 class RunDetail(RunSummary):
     order_state: dict[str, Any]
+    wake_guidance: list[str]
     memory_summary: str
     run_instructions: list[str]
     latest_decision: dict[str, Any] | None
@@ -115,6 +118,39 @@ class ControlResponse(BaseModel):
     status: str
 
 
+class SupervisorTemplateResponse(BaseModel):
+    key: str
+    name: str
+    description: str
+    base_instruction: str
+    allowed_actions: list[str]
+    wake_aggressiveness: str
+    default_wake_minutes: int
+    max_age_minutes: int
+    require_approval_for: list[str]
+
+
+class RunAnalytics(BaseModel):
+    """Per-run counters, plus the derived numbers worth showing."""
+
+    run_id: uuid.UUID
+    order_id: str
+    status: str
+    events_received: int = 0
+    agent_wakeups: int = 0
+    no_wake_events: int = 0
+    classifier_calls: int = 0
+    scheduled_reviews: int = 0
+    actions_executed: int = 0
+    customer_actions: int = 0
+    approvals_granted: int = 0
+    approvals_denied: int = 0
+    continuations: int = 0
+    duration_seconds: int = 0
+    wake_rate: float = 0.0
+    actions_per_wake: float = 0.0
+
+
 class RunStateResponse(BaseModel):
     """Live workflow state when available, otherwise the persisted snapshot."""
 
@@ -136,4 +172,5 @@ class RunStateResponse(BaseModel):
     last_wake_at: str | None = None
     pending_events: int = 0
     stats: dict[str, Any] = Field(default_factory=dict)
+    wake_guidance: list[str] = Field(default_factory=list)
     final_output: dict[str, Any] | None = None

@@ -35,6 +35,35 @@ class RunParams:
     order_context: dict[str, Any] = field(default_factory=dict)
     # Tools that a human must approve before they execute.
     require_approval_for: list[str] = field(default_factory=list)
+    # Continue-As-New once this many events have been handled. 0 disables it.
+    # Keep it low in development so the behaviour is easy to exercise.
+    continue_as_new_after_events: int = 0
+    # State carried across a Continue-As-New boundary; set by the workflow only.
+    carried: "CarriedState | None" = None
+
+
+@dataclass
+class CarriedState:
+    """The compact essentials that survive a Continue-As-New.
+
+    Deliberately small: current state, not history. The full timeline already
+    lives in PostgreSQL, so carrying it would defeat the purpose of resetting
+    workflow history.
+    """
+
+    order_state: dict[str, Any] = field(default_factory=dict)
+    memory_summary: str = ""
+    instructions: list[str] = field(default_factory=list)
+    wake_guidance: list[str] = field(default_factory=list)
+    stats: dict[str, int] = field(default_factory=dict)
+    executed_actions: list[dict[str, Any]] = field(default_factory=list)
+    pending_approvals: list[dict[str, Any]] = field(default_factory=list)
+    pending_events: list[dict[str, Any]] = field(default_factory=list)
+    recent_event_ids: list[str] = field(default_factory=list)
+    latest_decision: dict[str, Any] | None = None
+    started_at: str | None = None
+    sequence: int = 0
+    continuations: int = 0
 
 
 @dataclass

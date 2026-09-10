@@ -1,6 +1,7 @@
 """Run lifecycle endpoints: creation, inspection, events, instructions, controls."""
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -13,6 +14,7 @@ from app.api.schemas import (
     EventAccepted,
     EventCreate,
     InstructionCreate,
+    RunAnalytics,
     RunCreate,
     RunDetail,
     RunStateResponse,
@@ -90,11 +92,48 @@ async def get_run(run_id: uuid.UUID, session: SessionDep) -> RunDetail:
         created_at=run.created_at,
         completed_at=run.completed_at,
         order_state=run.order_state,
+        wake_guidance=run.wake_guidance,
         memory_summary=run.memory_summary,
         run_instructions=run.run_instructions,
         latest_decision=run.latest_decision,
         final_output=run.final_output,
         timeline=[ActivityResponse.model_validate(item) for item in activities],
+    )
+
+
+@router.get("/{run_id}/analytics", response_model=RunAnalytics)
+async def get_run_analytics(run_id: uuid.UUID, session: SessionDep) -> RunAnalytics:
+    """Counters for one run, plus the two ratios worth reading at a glance."""
+    run = await _load_run(session, run_id)
+    stats = run.stats or {}
+    events = int(stats.get("events_received", 0))
+    wakeups = int(stats.get("agent_wakeups", 0))
+    actions = int(stats.get("actions_executed", 0))
+    duration = int(stats.get("duration_seconds", 0))
+    if not duration:
+        end = run.completed_at or datetime.now(UTC)
+        duration = max(0, int((end - run.created_at).total_seconds()))
+
+    # Signal-driven wakes only: the start wake and scheduled reviews are not
+    # event responses, so including them would overstate the wake rate.
+    signal_wakes = max(0, wakeups - 1 - int(stats.get("scheduled_reviews", 0)))
+    return RunAnalytics(
+        run_id=run.id,
+        order_id=run.order_id,
+        status=run.status,
+        events_received=events,
+        agent_wakeups=wakeups,
+        no_wake_events=int(stats.get("no_wake_events", 0)),
+        classifier_calls=int(stats.get("classifier_calls", 0)),
+        scheduled_reviews=int(stats.get("scheduled_reviews", 0)),
+        actions_executed=actions,
+        customer_actions=int(stats.get("customer_actions", 0)),
+        approvals_granted=int(stats.get("approvals_granted", 0)),
+        approvals_denied=int(stats.get("approvals_denied", 0)),
+        continuations=int(stats.get("continuations", 0)),
+        duration_seconds=duration,
+        wake_rate=round(signal_wakes / events, 3) if events else 0.0,
+        actions_per_wake=round(actions / wakeups, 2) if wakeups else 0.0,
     )
 
 
@@ -120,6 +159,7 @@ async def get_run_state(
         status=run.status,
         terminal=run.completed_at is not None,
         order_state=run.order_state,
+        wake_guidance=run.wake_guidance,
         memory_summary=run.memory_summary,
         run_instructions=run.run_instructions,
         latest_decision=run.latest_decision,

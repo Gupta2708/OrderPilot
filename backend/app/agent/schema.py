@@ -20,6 +20,8 @@ MAX_SLEEP_MINUTES = 7 * 24 * 60
 MAX_ACTIONS_PER_DECISION = 4
 MAX_REASON_CHARS = 400
 MAX_MEMORY_CHARS = 400
+MAX_GUIDANCE_ITEMS = 3
+MAX_GUIDANCE_CHARS = 200
 
 
 class SleepSpec(BaseModel):
@@ -73,7 +75,15 @@ class AgentDecisionModel(BaseModel):
     actions: list[ProposedActionModel] = Field(default_factory=list)
     memory_update: str = Field(default="", max_length=MAX_MEMORY_CHARS)
     sleep: SleepSpec = Field(default_factory=SleepSpec)
-    completion_recommended: bool = True
+    # Absence of an opinion is not a recommendation to finish.
+    completion_recommended: bool = False
+    wake_guidance: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional standing triage hints for this order, e.g. 'treat any further "
+            "delay as critical'. Keep to at most three short lines."
+        ),
+    )
 
 
 def _resolve_sleep_minutes(sleep: SleepSpec, default_wake_minutes: int, now: datetime) -> int:
@@ -149,6 +159,23 @@ class WakeClassification(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
 
 
+def clean_guidance(lines: list[str]) -> list[str]:
+    """Bound what the agent can add to standing guidance.
+
+    Guidance feeds a later prompt, so it is capped in count and length and
+    stripped of blanks. It advises the classifier; it never overrides the
+    supervisor's configured sensitivity.
+    """
+    cleaned: list[str] = []
+    for line in lines:
+        text = " ".join(str(line).split())[:MAX_GUIDANCE_CHARS].strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+        if len(cleaned) >= MAX_GUIDANCE_ITEMS:
+            break
+    return cleaned
+
+
 def parse_decision(raw: str | dict[str, Any]) -> AgentDecisionModel:
     """Parse raw model output, raising ValidationError on anything malformed."""
     if isinstance(raw, str):
@@ -160,6 +187,8 @@ DECISION_JSON_SCHEMA_HINT = AgentDecisionModel.model_json_schema()
 
 __all__ = [
     "ActionArguments",
+    "MAX_GUIDANCE_ITEMS",
+    "clean_guidance",
     "AgentDecisionModel",
     "WakeClassification",
     "DECISION_JSON_SCHEMA_HINT",

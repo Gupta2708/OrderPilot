@@ -5,14 +5,16 @@ import { useParams } from "next/navigation";
 import { useCallback, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { countdown, durationSince, formatDateTime } from "@/lib/format";
-import type { RunDetail, RunState } from "@/lib/types";
+import type { RunAnalytics, RunDetail, RunState } from "@/lib/types";
 import { usePolling, useNow } from "@/lib/use-polling";
 import { Button, Card, ErrorBanner, Stat, StatusBadge } from "@/components/ui";
 import { EventSimulator } from "@/components/event-simulator";
 import {
   ActionHistoryCard,
+  AnalyticsCard,
   ApprovalsCard,
   DecisionCard,
+  GuidanceCard,
   FinalOutputCard,
   MemoryCard,
   OrderStateCard,
@@ -28,6 +30,7 @@ export default function RunControlRoom() {
 
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [state, setState] = useState<RunState | null>(null);
+  const [analytics, setAnalytics] = useState<RunAnalytics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -36,12 +39,14 @@ export default function RunControlRoom() {
 
   const load = useCallback(async () => {
     try {
-      const [nextDetail, nextState] = await Promise.all([
+      const [nextDetail, nextState, nextAnalytics] = await Promise.all([
         api.getRun(runId),
         api.getRunState(runId).catch(() => null),
+        api.getRunAnalytics(runId).catch(() => null),
       ]);
       setDetail(nextDetail);
       if (nextState) setState(nextState);
+      if (nextAnalytics) setAnalytics(nextAnalytics);
       setError(null);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Could not load this run");
@@ -166,6 +171,7 @@ export default function RunControlRoom() {
         <div className="space-y-5">
           <OrderStateCard state={orderState} />
           <MemoryCard memory={memory} />
+          <GuidanceCard guidance={state?.wake_guidance ?? detail.wake_guidance} />
           <Card title="Run instructions" subtitle="Live guidance for this run only">
             {instructions.length === 0 ? (
               <p className="text-sm text-slate-500">None yet.</p>
@@ -214,6 +220,7 @@ export default function RunControlRoom() {
 
         <div className="space-y-5">
           <TimelineCard entries={detail.timeline} />
+          <AnalyticsCard analytics={analytics} />
           <ActionHistoryCard entries={detail.timeline} />
         </div>
       </div>
